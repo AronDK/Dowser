@@ -1,6 +1,6 @@
 # Core alpha handoff
 
-Implemented in the FireFighter repository on 2026-10-02 from the
+Implemented in the Dowser repository on 2026-10-02 from the
 provided development plan and the current `System One Harness.md` note. The repository
 started empty. No deployment or package-registry publication is included.
 

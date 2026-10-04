@@ -8,14 +8,14 @@ Configuration rejects unknown fields. These are the provided factories:
 
 | Slot | Default factory | Settings |
 | --- | --- | --- |
-| event_store | `firefighter.store:sqlite_store` | `path` (default `.local/history.sqlite3`) |
-| tool_registry | `firefighter.core:tool_registry` | `plugins`: list of factory references |
-| context_builder | `firefighter.core:context_builder` | `recent_outcomes` (default 4) |
+| event_store | `dowser.store:sqlite_store` | `path` (default `.local/history.sqlite3`) |
+| tool_registry | `dowser.core:tool_registry` | `plugins`: list of factory references |
+| context_builder | `dowser.core:context_builder` | `recent_outcomes` (default 4) |
 | decision_provider | Implement your own | Defined by the provider |
-| validation_policy | `firefighter.core:validation_policy` | `allow_changes` (false), `allowed_resources` (null) |
-| executor | `firefighter.core:executor` | Empty |
-| verifier | `firefighter.core:verifier` | Empty |
-| incident_loop | `firefighter.loop:incident_loop` | Empty |
+| validation_policy | `dowser.core:validation_policy` | `allow_changes` (false), `allowed_resources` (null) |
+| executor | `dowser.core:executor` | Empty |
+| verifier | `dowser.core:verifier` | Empty |
+| incident_loop | `dowser.loop:incident_loop` | Empty |
 
 `schema_version` defaults to `"1"`. `limits` defaults to:
 
@@ -30,7 +30,7 @@ Configuration rejects unknown fields. These are the provided factories:
 }
 ```
 
-The `factory` decorator in `firefighter.contracts` declares the subsystem,
+The `factory` decorator in `dowser.contracts` declares the subsystem,
 interface version, component class, Pydantic settings class, and dependencies.
 Factories accept `(settings, context)` positionally and may return a component
 directly or awaitably. Illustrative declaration for an existing provider class:

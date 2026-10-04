@@ -1,4 +1,4 @@
-# FireFighter
+# Dowser
 
 An extensible Python harness for incident investigation, validated actions, and
 verification, with SQLite history. Read the [architecture blog](https://akeness.dev/).
@@ -8,8 +8,8 @@ verification, with SQLite history. Read the [architecture blog](https://akeness.
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```sh
-git clone https://github.com/AronDK/FireFighter.git
-cd FireFighter
+git clone https://github.com/AronDK/FireFighter.git Dowser
+cd Dowser
 uv sync --locked
 ```
 
@@ -20,9 +20,9 @@ decision provider and tool plugins; see the [extension and configuration guide](
 Put the incident JSON in `.local/incident.json` using the [incident schema](docs/extensions.md#public-schemas-and-services).
 
 ```sh
-uv run firefighter validate --config .local/config.json
-uv run firefighter run --config .local/config.json --incident .local/incident.json
-uv run firefighter inspect --config .local/config.json --incident-id INCIDENT_ID
+uv run dowser validate --config .local/config.json
+uv run dowser run --config .local/config.json --incident .local/incident.json
+uv run dowser inspect --config .local/config.json --incident-id INCIDENT_ID
 ```
 
 `validate` checks configuration without invoking models or tools. `run` emits a

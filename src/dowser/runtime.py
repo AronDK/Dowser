@@ -45,7 +45,7 @@ async def bounded_call(fn: Callable, *args, seconds: float):
     def run():
         asyncio.run(invoke())
 
-    threading.Thread(target=run, daemon=True, name="firefighter-extension").start()
+    threading.Thread(target=run, daemon=True, name="dowser-extension").start()
     try:
         done, _ = await asyncio.wait({future}, timeout=seconds)
         if not done:

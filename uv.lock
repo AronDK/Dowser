@@ -12,7 +12,7 @@ wheels = [
 ]
 
 [[package]]
-name = "firefighter"
+name = "dowser"
 version = "0.1.0a1"
 source = { editable = "." }
 dependencies = [

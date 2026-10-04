@@ -51,7 +51,7 @@ async def cancellable_dispatch(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="firefighter")
+    parser = argparse.ArgumentParser(prog="dowser")
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("validate", "run", "inspect"):
         sub = subparsers.add_parser(command)

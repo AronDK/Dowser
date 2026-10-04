@@ -3,17 +3,17 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "firefighter"
+name = "dowser"
 version = "0.1.0a1"
 description = "Extensible incident orchestration core"
 requires-python = ">=3.12"
 dependencies = ["pydantic>=2.10,<3"]
 
 [project.scripts]
-firefighter = "firefighter.cli:main"
+dowser = "dowser.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/firefighter"]
+packages = ["src/dowser"]
 
 [tool.uv]
 package = true
