@@ -85,7 +85,12 @@ an unknown attempt. Inspection preserves full events/artifacts and marks those
 unfinished executions as unknown. Hard interruption can leave the last phase as
 `execute`; inspection still identifies the unknown operation.
 
-Existing incident IDs are rejected without modifying their history. SIGINT/SIGTERM
+`run --incident` rejects existing incident IDs without modifying their history.
+`serve` retries source checkpoints using an existing durable terminal result without
+replaying actions; incomplete incidents remain uncheckpointed for reconciliation.
+Checkpoint attempts append history events without changing the SQLite schema.
+See [intake completion semantics](intake.md#durable-completion-and-redelivery).
+SIGINT/SIGTERM
 are handled where supported, preserving failure events and closing components.
 SIGKILL cannot record a termination, but the committed start remains durable.
 No automatic resumption, command replay, restart reconciliation, history compaction,

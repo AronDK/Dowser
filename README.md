@@ -23,11 +23,19 @@ Put the incident JSON in `.local/incident.json` using the [incident schema](docs
 uv run dowser validate --config .local/config.json
 uv run dowser run --config .local/config.json --incident .local/incident.json
 uv run dowser inspect --config .local/config.json --incident-id INCIDENT_ID
+uv run dowser serve --config .local/config.json
 ```
 
 `validate` checks configuration without invoking models or tools. `run` emits a
 JSON outcome: `resolved`, `escalated`, or `recovery_unverified`. `inspect` retrieves
 stored evidence and identifies interrupted executions as unknown.
+
+`serve` adds pluggable incident intake, async enrichment, a bounded pending queue,
+and serial scheduling. Configure an `incident_source`; normalization and scheduling
+default to the bundled compatibility normalizer and FIFO scheduler. A finite JSONL
+source is included. Terminal outcomes appear as JSON lines on stdout, with sanitized
+diagnostics on stderr. See the [intake guide](docs/intake.md) for configuration,
+severity ranking, and durable completion checkpoints.
 
 Actions are read-only by default. Changes require `allow_changes: true` in policy
 settings and a positive `limits.changes`. Keep local configuration and runtime data

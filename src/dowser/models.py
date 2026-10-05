@@ -83,6 +83,38 @@ class IncidentState(Boundary):
         return self
 
 
+class RawIncident(Boundary):
+    """Transient source envelope; never automatically persisted or sent to models."""
+
+    source_id: str = Field(min_length=1)
+    event_id: str = Field(min_length=1)
+    payload: JsonValue
+    metadata: dict[str, JsonValue] | None = None
+
+
+class PendingIncident(Boundary):
+    """Scheduler snapshot, deliberately excluding source checkpoint handles."""
+
+    queue_id: str = Field(min_length=1)
+    arrival_sequence: int = Field(ge=1)
+    state: IncidentState
+
+
+def alert_value(alert: dict, field: str):
+    """Prefer an optional canonical value, falling back to its native value."""
+    canonical = alert.get(f"canonical_{field}")
+    return alert.get(field) if canonical is None else canonical
+
+
+def mapped_value(mapping: dict, value, default=None):
+    """JSON object keys represent string or numeric platform values."""
+    if isinstance(value, str):
+        return mapping.get(value, default)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return mapping.get(str(value), default)
+    return default
+
+
 def normalize_incident(data: dict) -> IncidentState:
     """Accept the note's JSON; keep unknown platform fields in a payload."""
     data = dict(data)

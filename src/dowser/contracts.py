@@ -1,6 +1,6 @@
 """Public extension contracts and declarative factory metadata."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -18,6 +18,8 @@ from .models import (
     IncidentState,
     Limits,
     ParseResult,
+    PendingIncident,
+    RawIncident,
     TerminalResult,
     TransportResult,
     ValidationResult,
@@ -164,6 +166,28 @@ class IncidentLoop(Protocol):
     async def aclose(self) -> None: ...
 
 
+class IncidentSource(Protocol):
+    interface_version: str
+
+    async def open(self) -> AsyncIterator[RawIncident]: ...
+    async def checkpoint(self, record: RawIncident, result: TerminalResult) -> None: ...
+    async def aclose(self) -> None: ...
+
+
+class Normalizer(Protocol):
+    interface_version: str
+
+    async def normalize(self, record: RawIncident) -> IncidentState | None: ...
+    async def aclose(self) -> None: ...
+
+
+class Scheduler(Protocol):
+    interface_version: str
+
+    async def select(self, pending: Sequence[PendingIncident]) -> str: ...
+    async def aclose(self) -> None: ...
+
+
 # Positional arities, excluding self. validate checks these without instantiation.
 INTERFACES = {
     "event_store": {
@@ -187,6 +211,9 @@ INTERFACES = {
     "executor": {"execute": 2},
     "verifier": {"verify": 3},
     "incident_loop": {"run": 1},
+    "incident_source": {"open": 0, "checkpoint": 2},
+    "normalizer": {"normalize": 1},
+    "scheduler": {"select": 1},
 }
 INTERFACES["tool_plugin"] = INTERFACES["tool_registry"]
 

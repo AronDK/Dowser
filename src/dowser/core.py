@@ -10,6 +10,8 @@ from .models import (
     DecisionRequest,
     ValidationResult,
     VerificationResult,
+    alert_value,
+    mapped_value,
     now,
 )
 from .runtime import bounded_call
@@ -241,6 +243,8 @@ def context_builder(settings, context):
 class PolicySettings(Boundary):
     allow_changes: bool = False
     allowed_resources: list[str] | None = None
+    severity_rules: dict[str, bool] | None = None
+    priority_rules: dict[str, bool] | None = None
 
 
 class DefaultPolicy(Component):
@@ -262,6 +266,16 @@ class DefaultPolicy(Component):
                 )
             if budget["changes"] >= self.limits.changes:
                 return ValidationResult(allowed=False, reason="change budget exhausted")
+            for field in ("severity", "priority"):
+                rules = getattr(self.settings, f"{field}_rules")
+                if (
+                    rules is not None
+                    and mapped_value(rules, alert_value(state.alert, field), False)
+                    is not True
+                ):
+                    return ValidationResult(
+                        allowed=False, reason=f"changes blocked by {field} policy"
+                    )
         if self.settings.allowed_resources is not None and not set(
             candidate.resources
         ) <= set(self.settings.allowed_resources):

@@ -3,21 +3,40 @@
 import importlib
 import inspect
 import json
+import math
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from . import INTERFACE_VERSION
 from .contracts import INTERFACES, AppContext, ToolSpec
 from .models import Boundary, Limits
-from .runtime import bounded_call
+from .runtime import PersistentWorker, WorkerComponent, bounded_call
 
 
 class FactoryReference(Boundary):
     factory: str
     settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class IntakeSettings(Boundary):
+    pending_capacity: int = Field(default=32, ge=1)
+    normalization_seconds: float = Field(default=15, gt=0, allow_inf_nan=False)
+    scheduler_seconds: float = Field(default=15, gt=0, allow_inf_nan=False)
+    checkpoint_attempts: int = Field(default=3, ge=1)
+    checkpoint_seconds: float = Field(default=5, gt=0, allow_inf_nan=False)
+    checkpoint_retry_delays: list[float] = Field(default_factory=lambda: [0.5, 1.0])
+
+    @model_validator(mode="after")
+    def valid_delays(self):
+        if any(
+            not math.isfinite(value) or value < 0
+            for value in self.checkpoint_retry_delays
+        ):
+            raise ValueError("checkpoint delays must be finite and nonnegative")
+        return self
 
 
 class Configuration(Boundary):
@@ -31,9 +50,15 @@ class Configuration(Boundary):
     executor: FactoryReference
     verifier: FactoryReference
     incident_loop: FactoryReference
+    incident_source: FactoryReference | None = None
+    normalizer: FactoryReference | None = None
+    scheduler: FactoryReference | None = None
+    intake: IntakeSettings = Field(default_factory=IntakeSettings)
 
 
 SLOTS = tuple(k for k in INTERFACES if k != "tool_plugin")
+INTAKE_SLOTS = ("incident_source", "normalizer", "scheduler")
+EXECUTION_SLOTS = tuple(slot for slot in SLOTS if slot not in INTAKE_SLOTS)
 
 
 class ConfigurationError(ValueError):
@@ -141,7 +166,17 @@ def read_config(path: Path) -> Configuration:
 
 
 def validate_config(config: Configuration):
-    loaded = {slot: load_factory(getattr(config, slot), slot) for slot in SLOTS}
+    refs = {slot: getattr(config, slot) for slot in SLOTS}
+    if config.incident_source is not None:
+        refs["normalizer"] = refs["normalizer"] or FactoryReference(
+            factory="dowser.intake:compatibility_normalizer"
+        )
+        refs["scheduler"] = refs["scheduler"] or FactoryReference(
+            factory="dowser.intake:fifo_scheduler"
+        )
+    loaded = {
+        slot: load_factory(ref, slot) for slot, ref in refs.items() if ref is not None
+    }
     order: list[str] = []
     visiting: set[str] = set()
 
@@ -158,7 +193,7 @@ def validate_config(config: Configuration):
         visiting.remove(slot)
         order.append(slot)
 
-    for slot in SLOTS:
+    for slot in loaded:
         visit(slot)
     return loaded, order
 
@@ -192,6 +227,11 @@ class Application:
 
             for slot in self.requested:
                 include(slot)
+            if not set(self.requested) & set(INTAKE_SLOTS):
+                if needed & set(INTAKE_SLOTS):
+                    raise ConfigurationError(
+                        "requested execution services cannot depend on intake services"
+                    )
             order = [slot for slot in order if slot in needed]
         try:
             for slot in order:
@@ -204,16 +244,27 @@ class Application:
                     self.base_dir,
                 )
                 # Factories are application code; constructors own cleanup if they raise.
-                component = fn(settings, ctx)
-                if inspect.isawaitable(component):
-                    component = await component
-                self.initialized.append(component)
+                if slot in INTAKE_SLOTS:
+                    seconds = {
+                        "incident_source": self.config.intake.checkpoint_seconds,
+                        "normalizer": self.config.intake.normalization_seconds,
+                        "scheduler": self.config.intake.scheduler_seconds,
+                    }[slot]
+                    service = WorkerComponent(PersistentWorker(slot), seconds)
+                    self.initialized.append(service)
+                    component = await service.construct(fn, settings, ctx)
+                else:
+                    component = fn(settings, ctx)
+                    if inspect.isawaitable(component):
+                        component = await component
+                    service = component
+                    self.initialized.append(component)
                 if not isinstance(component, fn.component_type):
                     raise ConfigurationError(
                         f"{slot}: factory returned unexpected component type"
                     )
                 check_component(type(component), slot)
-                self.services[slot] = component
+                self.services[slot] = service
         except BaseException:
             await self.close()
             raise
@@ -224,7 +275,10 @@ class Application:
         while self.initialized:
             component = self.initialized.pop()
             try:
-                await bounded_call(component.aclose, seconds=2)
+                if isinstance(component, WorkerComponent):
+                    await component.aclose()
+                else:
+                    await bounded_call(component.aclose, seconds=2)
             except BaseException as exc:
                 errors.append(type(exc).__name__)
         if errors:

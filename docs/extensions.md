@@ -2,7 +2,8 @@
 
 ## Factories
 
-Each slot is mandatory in the version 1 JSON configuration. Each reference is
+The eight execution slots remain mandatory in the version 1 JSON configuration.
+Intake slots are optional; `serve` requires an `incident_source`. Each reference is
 `{"factory": "module:callable", "settings": {...}}`. Settings default to `{}`.
 Configuration rejects unknown fields. These are the provided factories:
 
@@ -12,10 +13,19 @@ Configuration rejects unknown fields. These are the provided factories:
 | tool_registry | `dowser.core:tool_registry` | `plugins`: list of factory references |
 | context_builder | `dowser.core:context_builder` | `recent_outcomes` (default 4) |
 | decision_provider | Implement your own | Defined by the provider |
-| validation_policy | `dowser.core:validation_policy` | `allow_changes` (false), `allowed_resources` (null) |
+| validation_policy | `dowser.core:validation_policy` | `allow_changes` (false), `allowed_resources` (null), `severity_rules` / `priority_rules` (null) |
 | executor | `dowser.core:executor` | Empty |
 | verifier | `dowser.core:verifier` | Empty |
 | incident_loop | `dowser.loop:incident_loop` | Empty |
+| incident_source | `dowser.intake:jsonl_source` | `path`, `source_id` (default `jsonl`) |
+| normalizer | `dowser.intake:compatibility_normalizer` | `severity_map`, `priority_map` (empty) |
+| scheduler | `dowser.intake:fifo_scheduler` or `dowser.intake:mapped_rank_scheduler` | Empty for FIFO; `severity_ranks`, `priority_ranks` (empty) for mapped ranks |
+
+An omitted normalizer or scheduler defaults to compatibility normalization and FIFO
+when a source is configured. See [intake and checkpoints](intake.md) for `intake`
+settings, extension examples, and source concurrency requirements. Old configurations
+remain valid; `run` and `inspect` never construct intake services. Execution services
+used by those commands must therefore have no dependency on an intake service.
 
 `schema_version` defaults to `"1"`. `limits` defaults to:
 
@@ -82,6 +92,9 @@ execution or resolution.
 | Executor | `execute(candidate, state)` |
 | Verifier | `verify(state, candidate, execution)` |
 | IncidentLoop | `run(state)` |
+| IncidentSource | `open() -> AsyncIterator[RawIncident]`, `checkpoint(record, terminal_result)` |
+| Normalizer | `normalize(raw_record) -> IncidentState \| None` |
+| Scheduler | `select(pending_snapshots) -> str` (a supplied queue ID) |
 
 `IncidentState` has alert and desired-state dictionaries, scoped `Resource` objects,
 typed observations, attempts, instructions, unresolved questions, phase, and a
@@ -161,12 +174,22 @@ Factories and imported Python code are trusted. There is no sandbox, isolation,
 hot reload, or security boundary between components. Default orchestration passes
 deep copies of state/request/candidate boundaries to extensions.
 
-Extension operations run serially in daemon worker threads, each with its own asyncio
-loop, to let the owner enforce elapsed deadlines when an async method blocks or ignores
-cancellation. Components must support calls across threads/loops. Avoid retaining
+Execution extension operations run serially in daemon worker threads, each with its
+own asyncio loop, to let the owner enforce elapsed deadlines when an async method
+blocks or ignores cancellation. Execution components must support calls across
+threads/loops. Avoid retaining
 loop-bound sessions or locks between calls; create them within a call, or own a
 dedicated adapter transport thread. The SQLite implementation uses a thread lock.
 Calls made directly by extension code are that extension's responsibility.
+
+Each intake component has a persistent daemon worker loop. Its factory, asynchronous
+construction, method calls, iterator pulls, and cleanup run on that loop. Intake
+components may retain loop-owned clients and locks. Declared intake dependencies
+are service proxies that route asynchronous calls to the dependency's owner loop.
+Execution dependencies retain their existing runtime requirements. Sources must
+support one outstanding iterator pull concurrently with checkpoint calls on their
+loop; idle pulls have no deadline. Cleanup cancels outstanding tasks before calling
+`aclose()` on the same loop, with the existing two-second cleanup deadline.
 
 A timed-out worker may still affect the external system. The incident stops, records
 an unknown outcome, and cannot be restarted under the same ID. Cleanup may overlap

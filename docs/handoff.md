@@ -4,11 +4,20 @@ Implemented in the Dowser repository on 2026-10-02 from the
 provided development plan and the current `System One Harness.md` note. The repository
 started empty. No deployment or package-registry publication is included.
 
-The core includes the Python package/CLI, all eight configurable extension slots,
+The core includes the Python package/CLI, all eight configurable execution slots,
 declarative factory compatibility checks, dependency ordering and reverse cleanup,
 default registered-tool execution and policy, bounded context, incident lifecycle,
 verification, elapsed deadlines, and transactional SQLite events/artifacts. A decision
 provider is required and has no default. Tool plugins are supplied by deployments.
+
+On 2026-10-05, the pluggable intake plan added three optional factory slots:
+`incident_source`, `normalizer`, and `scheduler`. `serve` uses persistent intake
+worker loops, a bounded queue, serial incident scheduling, and source checkpoints
+after durable terminal outcomes. Bundled adapters include JSONL, compatibility
+normalization with optional severity/priority mappings, FIFO, and mapped-rank
+scheduling. The default policy supports optional severity and priority restrictions.
+Existing commands/configurations and incident/store schema version 1 are preserved.
+See the [intake guide](intake.md) for configuration and lifecycle requirements.
 
 ## Verification
 
@@ -23,7 +32,8 @@ Run the suite locally after `uv sync --locked`:
 uv run python -m unittest discover -s .local/tests -v
 ```
 
-Acceptance result: **49 tests passed**, including parameterized subsystem replacement
+Acceptance result: **93 tests passed** (49 original and 44 intake tests), including
+parameterized subsystem replacement
 and failure cases. Full output is in `.local/test-results.txt`. The suite blocks socket
 connections and runs CLI subprocesses with no credentials. It uses no models, model
 weights, paid inference, devices, or infrastructure access.
@@ -49,6 +59,18 @@ Verified cases include:
   or unknown references, state reconstruction, and credential-field rejection.
 - CLI validation without construction and inspection without constructing unrelated
   providers/plugins.
+- Persistent intake construction, iterator/client ownership, dependency proxies,
+  cleanup after startup failures, bounded pending capacity, idle cancellation,
+  finite exhaustion, and serial nonpreemptive scheduling.
+- Async enrichment, explicit skips, invalid/mutated normalized states, credential
+  rejection, platform-field preservation, canonical mappings, FIFO and rank order,
+  stable ties, snapshot-only selections, and severity/priority policy restrictions.
+- All terminal checkpoints, bounded retries/timeouts, continued execution after
+  checkpoint failure, duplicate delivery without action replay, incomplete-incident
+  reconciliation, execution failure/interruption after durable termination, and
+  SIGKILL between termination and checkpoint followed by restart/redelivery.
+- JSONL stdout, sanitized stderr, finite-run exit status, missing source, SIGINT/
+  SIGTERM idle interruption, and `run`/`inspect` avoiding intake construction.
 
 The package builds as a source distribution and a wheel using `uv build --out-dir
 .local/dist`. Ruff lint/format checks, source compilation, and whitespace checks pass.
@@ -62,9 +84,12 @@ evidence of model decision quality, real-device safety/compatibility, remediatio
 effectiveness, production latency, or operational benchmarks. Verification hooks
 remain trusted code responsible for incident-specific evidence and persistence windows.
 
-Extension operations run across daemon worker threads/asyncio loops; adapters must
-respect that lifecycle. Deadlines stop orchestration and record unknown effects, but
+Execution extension operations run across per-call daemon worker threads/asyncio
+loops; intake adapters have persistent owner loops. Adapters must respect those
+lifecycles. Deadlines stop orchestration and record unknown effects, but
 cannot undo external work, isolate a native extension holding the GIL, or recover a
 killed process. See [extension runtime requirements](extensions.md#runtime-and-trust).
-There is no automatic restart recovery, command replay, plugin isolation, daemon,
-distributed coordination, NXOS plugin, or concrete Jev/CLM adapter.
+There is no automatic execution resumption, command replay, plugin isolation,
+active-incident merging, distributed coordination, NXOS plugin, or concrete Jev/CLM
+adapter. Checkpoint retry after restart depends on source redelivery; there is no
+automatic scan or checkpoint retry job.

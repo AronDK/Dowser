@@ -1,6 +1,7 @@
 """Bound extension calls even if an async implementation blocks or ignores cancel."""
 
 import asyncio
+import inspect
 import threading
 from collections.abc import Callable
 
@@ -60,3 +61,114 @@ async def bounded_call(fn: Callable, *args, seconds: float):
                     loop.call_soon_threadsafe(task.cancel)
                 except RuntimeError:
                     pass
+
+
+class PersistentWorker:
+    """One daemon loop for an intake component's entire resource lifetime.
+
+    Source pulls and checkpoints can overlap on this loop. Owner-side deadlines
+    remain effective even when extension code blocks or ignores cancellation.
+    """
+
+    def __init__(self, name: str):
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(
+            target=self._run, daemon=True, name=f"dowser-{name}"
+        )
+        self.thread.start()
+
+    def _run(self):
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(self.loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self.loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+            self.loop.close()
+
+    async def call(self, fn: Callable, *args, seconds: float | None):
+        if seconds is not None and seconds <= 0:
+            raise TimeoutError("extension deadline exhausted")
+
+        async def invoke():
+            # SystemExit/KeyboardInterrupt must not kill the worker loop and
+            # strand an idle source pull. Deliver all failures to the owner.
+            try:
+                value = fn(*args)
+                value = await value if inspect.isawaitable(value) else value
+                return value, None
+            except BaseException as error:
+                return None, error
+
+        future = asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(invoke(), self.loop)
+        )
+        try:
+            done, _ = await asyncio.wait({future}, timeout=seconds)
+            if not done:
+                raise TimeoutError("extension call exceeded deadline")
+            value, error = future.result()
+            if error is not None:
+                raise error
+            return value
+        finally:
+            if not future.done():
+                future.cancel()
+
+    def stop(self):
+        try:
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        except RuntimeError:
+            pass
+
+
+class WorkerComponent:
+    """Route intake service calls, including dependency calls, to their owner."""
+
+    interface_version = "1"
+
+    def __init__(self, worker: PersistentWorker, seconds: float):
+        self.worker = worker
+        self.seconds = seconds
+        self.component = None
+
+    async def construct(self, fn, settings, context):
+        async def create():
+            value = fn(settings, context)
+            self.component = await value if inspect.isawaitable(value) else value
+            return self.component
+
+        return await self.worker.call(create, seconds=15)
+
+    async def call(self, name, *args, seconds):
+        return await self.worker.call(
+            getattr(self.component, name), *args, seconds=seconds
+        )
+
+    def __getattr__(self, name):
+        async def invoke(*args):
+            return await self.call(name, *args, seconds=self.seconds)
+
+        return invoke
+
+    async def aclose(self):
+        async def close_owned():
+            current = asyncio.current_task()
+            pending = asyncio.all_tasks() - {current}
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if self.component is not None:
+                await self.component.aclose()
+
+        try:
+            await self.worker.call(close_owned, seconds=2)
+        finally:
+            self.worker.stop()
