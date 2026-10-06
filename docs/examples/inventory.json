@@ -1,0 +1,19 @@
+{
+  "resources": {
+    "nexus-lab": {
+      "platform": "nxos", "platform_version": "10.4(x)",
+      "transport": "nxapi", "endpoint": "https://nexus.example.net",
+      "username_env": "DOWSER_NX_USER", "password_env": "DOWSER_NX_PASSWORD",
+      "interfaces": ["Ethernet1/1", "Ethernet1/2"],
+      "protected_interfaces": ["Ethernet1/2"], "vlans": [100, 200],
+      "vrfs": ["default"], "prefixes": ["192.0.2.0/24"]
+    },
+    "inference-lab": {
+      "platform": "vllm", "endpoint": "http://127.0.0.1:8000", "models": ["som"],
+      "docker": {
+        "container": "dowser-vllm-1", "unix_socket": "/var/run/docker.sock",
+        "compose_project": "dowser", "compose_service": "vllm"
+      }
+    }
+  }
+}

@@ -8,7 +8,7 @@ The core includes the Python package/CLI, all eight configurable execution slots
 declarative factory compatibility checks, dependency ordering and reverse cleanup,
 default registered-tool execution and policy, bounded context, incident lifecycle,
 verification, elapsed deadlines, and transactional SQLite events/artifacts. A decision
-provider is required and has no default. Tool plugins are supplied by deployments.
+provider is required and has no default. Deployments select bundled or custom tool plugins.
 
 On 2026-10-05, the pluggable intake plan added three optional factory slots:
 `incident_source`, `normalizer`, and `scheduler`. `serve` uses persistent intake
@@ -104,6 +104,29 @@ lifecycles. Deadlines stop orchestration and record unknown effects, but
 cannot undo external work, isolate a native extension holding the GIL, or recover a
 killed process. See [extension runtime requirements](extensions.md#runtime-and-trust).
 There is no automatic execution resumption, command replay, plugin isolation,
-active-incident merging, distributed coordination, NXOS plugin, or concrete Jev/CLM
-adapter. Checkpoint retry after restart depends on source redelivery; there is no
+active-incident merging, distributed coordination, or concrete Jev/CLM adapter. Checkpoint retry after restart depends on source redelivery; there is no
 automatic scan or checkpoint retry job.
+
+## Platform adapters (2026-10-06)
+
+The installable `plugins` package now includes NX-OS 10.4(x) tools over verified
+NX-API HTTPS and pinned-host-key SSH, both vLLM roles (SOM decisions and managed
+Docker/Compose services), private inventory models, and explicit-platform JSONL
+normalization. See [the platform guide](platforms.md) and its read-only and opt-in
+remediation examples. Changes require plugin enablement, policy permission and an
+explicit budget. Unknown writes terminate for reconciliation. A SOM outage escalates
+without inference failover or unsolicited remediation.
+
+Verification: 44 tracked offline platform tests and all 116 existing private harness
+tests passed (160 total). Platform tests are in `tests/test_platforms.py`; they block
+socket connections and use simulated transports. Their output is recorded in
+`.local/platform-test-results.txt`; regression output is in
+`.local/platform-core-regression-results.txt`. The wheel and source distribution
+build successfully, exclude private/runtime artifacts, and the wheel imports and
+validates factories in a fresh base-only environment without HTTPX/AsyncSSH/Prometheus.
+Lint, format, compilation, whitespace and both example configuration checks pass.
+
+These checks cover schema/scope enforcement, safe runtime ownership, procedure
+outcomes, readiness, performance windows and harness integration. NX-OS fixtures
+are simulated structured responses; no real-device, GPU, model-quality, deployment,
+or performance benchmark claims follow. Optional read-only lab checks were not run.

@@ -1,0 +1,90 @@
+{
+  "schema_version": "1",
+  "event_store": {
+    "factory": "dowser.store:sqlite_store"
+  },
+  "tool_registry": {
+    "factory": "dowser.core:tool_registry",
+    "settings": {
+      "plugins": [
+        {
+          "factory": "plugins.nxos:tool_plugin",
+          "settings": {
+            "inventory_path": "docs/examples/inventory.json",
+            "enable_changes": true
+          }
+        },
+        {
+          "factory": "plugins.vllm:tool_plugin",
+          "settings": {
+            "inventory_path": "docs/examples/inventory.json",
+            "metrics_thresholds": {
+              "queue_max": 4,
+              "cache_max": 0.9,
+              "latency_mean": 2
+            },
+            "enable_changes": true
+          }
+        }
+      ]
+    }
+  },
+  "context_builder": {
+    "factory": "dowser.core:context_builder"
+  },
+  "decision_provider": {
+    "factory": "plugins.vllm:decision_provider",
+    "settings": {
+      "endpoint": "http://127.0.0.1:8000",
+      "profile": {
+        "model": "som",
+        "context_window": 32768,
+        "output_tokens": 2048,
+        "inference_timeout": 60,
+        "max_decisions_per_round": 2
+      }
+    }
+  },
+  "validation_policy": {
+    "factory": "dowser.core:validation_policy",
+    "settings": {
+      "allow_changes": true,
+      "allowed_resources": [
+        "nexus-lab",
+        "inference-lab"
+      ]
+    }
+  },
+  "executor": {
+    "factory": "dowser.core:executor"
+  },
+  "verifier": {
+    "factory": "dowser.core:verifier"
+  },
+  "incident_loop": {
+    "factory": "dowser.loop:incident_loop"
+  },
+  "incident_source": {
+    "factory": "dowser.intake:jsonl_source",
+    "settings": {
+      "path": "docs/examples/incidents.jsonl"
+    }
+  },
+  "normalizer": {
+    "factory": "plugins.normalizers:platform_normalizer",
+    "settings": {
+      "inventory_path": "docs/examples/inventory.json",
+      "severity_map": {
+        "major": "high"
+      }
+    }
+  },
+  "scheduler": {
+    "factory": "dowser.intake:fifo_scheduler"
+  },
+  "limits": {
+    "tool_seconds": 360,
+    "incident_seconds": 900,
+    "changes": 1
+  }
+}

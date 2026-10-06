@@ -12,7 +12,7 @@ Configuration rejects unknown fields. These are the provided factories:
 | event_store | `dowser.store:sqlite_store` | `path` (default `.local/history.sqlite3`) |
 | tool_registry | `dowser.core:tool_registry` | `plugins`: list of factory references |
 | context_builder | `dowser.core:context_builder` | `recent_outcomes` (default 4) |
-| decision_provider | Implement your own | Defined by the provider |
+| decision_provider | `plugins.vllm:decision_provider` or your adapter | Deployment profile and private endpoint settings |
 | validation_policy | `dowser.core:validation_policy` | `allow_changes` (false), `allowed_resources` (null), `severity_rules` / `priority_rules` (null) |
 | executor | `dowser.core:executor` | Empty |
 | verifier | `dowser.core:verifier` | Empty |
@@ -249,3 +249,10 @@ The core rejects common structured credential keys and avoids persisting arbitra
 exception text. Plugins/providers must sanitize free-text and raw output; key filtering
 cannot discover every secret embedded in text. Configuration settings are never
 persisted by the core. There is no live credential requirement for private validation.
+
+## Bundled platform adapters
+
+The installable `plugins` package provides NX-OS tools and normalization, a vLLM
+decision provider, managed-vLLM tools and normalization, and a mixed-platform router.
+See [platform configuration and verification](platforms.md) for factories, optional
+dependencies, inventory scopes, tool catalogues and runnable JSON examples.

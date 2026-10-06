@@ -1,0 +1,2 @@
+{"platform":"nxos","resource_id":"nexus-lab","alert":{"type":"interface_down","severity":"major","details":{"native_code":17}},"scope":{"interfaces":["Ethernet1/1"],"vlans":[100]},"desired_state":{"admin_state":"up","oper_state":"up"}}
+{"platform":"vllm","resource_id":"inference-lab","alert":{"type":"unavailable","severity":"critical"},"scope":{"models":["som"]},"desired_state":{"available":true}}

@@ -9,11 +9,15 @@ description = "Extensible incident orchestration core"
 requires-python = ">=3.12"
 dependencies = ["pydantic>=2.10,<3"]
 
+[project.optional-dependencies]
+nxos = ["httpx>=0.28,<1", "asyncssh>=2.20,<3"]
+vllm = ["httpx>=0.28,<1", "prometheus-client>=0.21,<1"]
+
 [project.scripts]
 dowser = "dowser.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["dowser"]
+packages = ["dowser", "plugins"]
 
 [tool.uv]
 package = true

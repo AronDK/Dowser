@@ -3,8 +3,8 @@
 An extensible Python harness for incident investigation, validated actions, and
 verification, with SQLite history. Read the [architecture blog](https://akeness.dev/).
 
-The core Python package lives in `dowser/`. The `plugins/` directory is reserved for
-platform-specific extensions.
+The core Python package lives in `dowser/`. The `plugins/` package includes NX-OS diagnostics, restricted interface fixes, and
+vLLM decision-provider and managed-service adapters. See the [platform guide](docs/platforms.md).
 
 ## Install
 
@@ -49,5 +49,5 @@ Actions are read-only by default. Changes require `allow_changes: true` in polic
 settings and a positive `limits.changes`. Keep local configuration and runtime data
 under the gitignored `.local/` directory; SQLite defaults to `.local/history.sqlite3`.
 
-Core alpha: no bundled model adapter or device plugin, and no automatic incident
-resumption. See [lifecycle behavior](docs/lifecycle.md) and the [verification handoff](docs/handoff.md).
+Core alpha: platform adapters require deployment inventory and a validated SOM
+profile. There is no automatic incident resumption. See [lifecycle behavior](docs/lifecycle.md) and the [verification handoff](docs/handoff.md).
