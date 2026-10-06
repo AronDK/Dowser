@@ -13,7 +13,7 @@ dependencies = ["pydantic>=2.10,<3"]
 dowser = "dowser.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dowser"]
+packages = ["dowser"]
 
 [tool.uv]
 package = true

@@ -3,6 +3,9 @@
 An extensible Python harness for incident investigation, validated actions, and
 verification, with SQLite history. Read the [architecture blog](https://akeness.dev/).
 
+The core Python package lives in `dowser/`. The `plugins/` directory is reserved for
+platform-specific extensions.
+
 ## Install
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
@@ -36,6 +39,11 @@ default to the bundled compatibility normalizer and FIFO scheduler. A finite JSO
 source is included. Terminal outcomes appear as JSON lines on stdout, with sanitized
 diagnostics on stderr. See the [intake guide](docs/intake.md) for configuration,
 severity ranking, and durable completion checkpoints.
+
+Providers can return multiple actionable decisions per response, constrained by
+their selected model's advertised capability. There is no harness decision-round
+count limit; incident deadlines and action limits still apply. See the
+[provider contract](docs/extensions.md#context-and-provider-adapters).
 
 Actions are read-only by default. Changes require `allow_changes: true` in policy
 settings and a positive `limits.changes`. Keep local configuration and runtime data

@@ -11,7 +11,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from . import INTERFACE_VERSION
-from .contracts import INTERFACES, AppContext, ToolSpec
+from .contracts import INTERFACES, OPTIONAL_INTERFACES, AppContext, ToolSpec
 from .models import Boundary, Limits
 from .runtime import PersistentWorker, WorkerComponent, bounded_call
 
@@ -73,7 +73,13 @@ def check_component(cls: type, subsystem: str) -> None:
         raise ConfigurationError(
             f"{subsystem}: incompatible component interface version"
         )
-    for name, arity in {**INTERFACES[subsystem], "aclose": 0}.items():
+    methods = {**INTERFACES[subsystem], "aclose": 0}
+    methods.update(
+        (name, arity)
+        for name, arity in OPTIONAL_INTERFACES.get(subsystem, {}).items()
+        if getattr(cls, name, None) is not None
+    )
+    for name, arity in methods.items():
         method = getattr(cls, name, None)
         if not inspect.iscoroutinefunction(method):
             raise ConfigurationError(f"{subsystem}.{name} must be asynchronous")

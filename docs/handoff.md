@@ -19,6 +19,14 @@ scheduling. The default policy supports optional severity and priority restricti
 Existing commands/configurations and incident/store schema version 1 are preserved.
 See the [intake guide](intake.md) for configuration and lifecycle requirements.
 
+On 2026-10-06, the core package moved from `src/dowser/` to `dowser/`, with a
+`plugins/` directory reserved for platform extensions. The fixed incident-wide
+decision-round count was removed. Providers may expose model-specific
+`DecisionCapabilities` and return an ordered `DecisionBatch`, with selections
+validated against the advertised capacity and executed serially through the
+existing policy and verification gates. Legacy single-result providers remain
+compatible; old `limits.decision_rounds` settings are accepted and ignored.
+
 ## Verification
 
 Private tests and fixtures are under `.local/tests/` and `.local/fixtures/`; `.gitignore`
@@ -32,7 +40,7 @@ Run the suite locally after `uv sync --locked`:
 uv run python -m unittest discover -s .local/tests -v
 ```
 
-Acceptance result: **93 tests passed** (49 original and 44 intake tests), including
+Acceptance result: **116 tests passed** (93 existing and 23 decision-capability tests), including
 parameterized subsystem replacement
 and failure cases. Full output is in `.local/test-results.txt`. The suite blocks socket
 connections and runs CLI subprocesses with no credentials. It uses no models, model
@@ -50,7 +58,7 @@ Verified cases include:
 - Revalidation after preconditions change; policy, scope, platform/version, freshness,
   required evidence, registered capability, and concrete argument enforcement.
 - Missing/malformed output, parser failure, inconclusive/fabricated verification,
-  ineffective repetition, and round, duration, tool, candidate, attempt, and change limits.
+  ineffective repetition, duration, tool, candidate, attempt, and change limits.
 - Partial procedures, separate per-step artifacts/outcomes, registered recovery,
   recovery budget rejection, changed recovery preconditions, and no forced rollback.
 - Blocking/uncooperative tools and providers, cancellation, SIGINT, SIGTERM, SIGKILL,
@@ -71,6 +79,12 @@ Verified cases include:
   SIGKILL between termination and checkpoint followed by restart/redelivery.
 - JSONL stdout, sanitized stderr, finite-run exit status, missing source, SIGINT/
   SIGTERM idle interruption, and `run`/`inspect` avoiding intake construction.
+- Model-specific capacities of 1, 2, 32, and 64, with no fixed core maximum;
+  more than ten rounds per incident; legacy single-result and configuration
+  compatibility; constructor-free capability-signature validation.
+- Whole-batch validation before effects, capacity rejection, serial execution,
+  revalidation after each effect, early resolution, failure-driven context refresh,
+  registered recovery, final wait/escalation, and preserved execution budgets.
 
 The package builds as a source distribution and a wheel using `uv build --out-dir
 .local/dist`. Ruff lint/format checks, source compilation, and whitespace checks pass.

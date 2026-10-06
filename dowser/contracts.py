@@ -11,6 +11,8 @@ from . import INTERFACE_VERSION
 from .models import (
     ActionCandidate,
     ContextCheck,
+    DecisionBatch,
+    DecisionCapabilities,
     DecisionRequest,
     DecisionResult,
     Event,
@@ -83,8 +85,16 @@ class DecisionProvider(Protocol):
     interface_version: str
 
     async def check_context(self, request: DecisionRequest) -> ContextCheck: ...
-    async def decide(self, request: DecisionRequest) -> DecisionResult: ...
+    async def decide(
+        self, request: DecisionRequest
+    ) -> DecisionResult | DecisionBatch: ...
     async def aclose(self) -> None: ...
+
+
+class DecisionCapabilityProvider(Protocol):
+    """Optional additional contract for providers returning multiple decisions."""
+
+    async def capabilities(self) -> DecisionCapabilities: ...
 
 
 class EventStore(Protocol):
@@ -216,6 +226,7 @@ INTERFACES = {
     "scheduler": {"select": 1},
 }
 INTERFACES["tool_plugin"] = INTERFACES["tool_registry"]
+OPTIONAL_INTERFACES = {"decision_provider": {"capabilities": 0}}
 
 
 def factory(

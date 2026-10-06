@@ -200,6 +200,25 @@ class DecisionResult(Boundary):
         return self
 
 
+class DecisionCapabilities(Boundary):
+    """Decision volume advertised by the selected model's provider adapter."""
+
+    max_decisions_per_round: int = Field(ge=1)
+    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class DecisionBatch(Boundary):
+    """Ordered decisions from one provider call; wait/escalate ends the batch."""
+
+    decisions: list[DecisionResult] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def terminal_last(self):
+        if any(decision.operation != "select" for decision in self.decisions[:-1]):
+            raise ValueError("wait or escalation must be the final batch decision")
+        return self
+
+
 class ValidationResult(Boundary):
     allowed: bool
     reason: str = ""
@@ -306,9 +325,17 @@ class Event(Boundary):
 
 
 class Limits(Boundary):
-    decision_rounds: int = Field(default=10, ge=1)
     incident_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
     tool_seconds: float = Field(default=15, gt=0, allow_inf_nan=False)
     identical_attempts: int = Field(default=2, ge=1)
     changes: int = Field(default=0, ge=0)
     freshness_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def obsolete_round_limit(cls, value):
+        # Preserve loading old configuration files without retaining a core cap.
+        if isinstance(value, dict) and "decision_rounds" in value:
+            value = dict(value)
+            value.pop("decision_rounds")
+        return value

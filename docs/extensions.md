@@ -31,7 +31,6 @@ used by those commands must therefore have no dependency on an intake service.
 
 ```json
 {
-  "decision_rounds": 10,
   "incident_seconds": 120,
   "tool_seconds": 15,
   "identical_attempts": 2,
@@ -39,6 +38,12 @@ used by those commands must therefore have no dependency on an intake service.
   "freshness_seconds": 60
 }
 ```
+
+The harness has no decision-round count limit. Model-specific decision volume is
+advertised by the provider through the optional `capabilities()` contract below.
+Legacy `limits.decision_rounds` entries are accepted and ignored; they are omitted
+when configuration is serialized. The incident deadline and execution limits remain
+independent of model capacity.
 
 The `factory` decorator in `dowser.contracts` declares the subsystem,
 interface version, component class, Pydantic settings class, and dependencies.
@@ -87,7 +92,7 @@ execution or resolution.
 | EventStore | `ingest(state)`, `append(id, kind, payload, artifacts=None)`, `history(id)`, `reconstruct(id)`, `inspect(id)` |
 | ToolRegistry / ToolPlugin | `candidates(state)`, `validate(candidate, state)`, `execute(candidate, state)`, `parse(candidate, transport)`, `verify(state, candidate, execution)`, `recover(state, candidate, execution)` |
 | ContextBuilder | `build(state, candidates)`, `trim(request)` |
-| DecisionProvider | `check_context(request)`, `decide(request)` |
+| DecisionProvider | `check_context(request)`, `decide(request)`; optional `capabilities()` |
 | ValidationPolicy | `validate(candidate, state, budget)` |
 | Executor | `execute(candidate, state)` |
 | Verifier | `verify(state, candidate, execution)` |
@@ -155,9 +160,50 @@ recovery candidates whose current preconditions can be revalidated.
 ## Context and provider adapters
 
 `check_context` reports `ContextCheck(fits=..., reason=...)` using the adapter's
-own accounting. It must not call a model. `decide` returns a normalized `DecisionResult`
-with `select` and a known candidate ID, `wait` and a positive duration, or `escalate`.
-The core ships no substitute provider and performs no tokenizer downloads.
+own accounting. It must not call a model. `decide` returns a normalized
+`DecisionResult` or `DecisionBatch`. Each decision is `select` with a known candidate
+ID, `wait` with a positive duration, or `escalate`. The core ships no substitute
+provider and performs no tokenizer downloads.
+
+Providers supporting multiple actionable choices expose
+`async capabilities() -> DecisionCapabilities`. Its `max_decisions_per_round` is a
+positive integer derived from the selected model's capabilities; there is no core
+maximum. Optional JSON `metadata` can identify the model or capability version.
+This method reports capabilities without invoking model inference. Its signature
+is checked during constructor-free factory validation when present.
+
+One call to `decide` constitutes a model decision round. A provider advertising a
+capacity of 64 may return up to 64 decisions in that response:
+
+```python
+async def capabilities(self):
+    return DecisionCapabilities(max_decisions_per_round=self.model_decision_capacity)
+
+async def decide(self, request):
+    selected_ids = await self.model.select_candidates(request)
+    return DecisionBatch(
+        decisions=[
+            DecisionResult(operation="select", candidate_id=candidate_id)
+            for candidate_id in selected_ids
+        ]
+    )
+```
+
+The harness reads the provider's capacity for each round, records it, and validates
+the entire response before executing any selection. Every selected ID must belong
+to that request's authorized snapshot; exceeding the advertised capacity fails the
+response. Batch decisions execute in order, one action at a time, with current
+validation and verification after each action. Resolution ends the incident and
+discards remaining selections. Execution or parsing failure discards the remaining
+batch and refreshes the provider's view, offering recovery candidates when applicable.
+`wait` or `escalate` may appear only as the final batch decision. A wait returns to
+observation after its duration; escalation terminates the incident.
+
+Existing single-result providers continue to work without `capabilities()`, using
+their original one-decision response contract. To return more than one decision,
+a provider must advertise its model's capacity. Provider-internal reasoning steps
+and inference retries remain adapter responsibilities. There is no incident-wide
+count limit on provider calls; the elapsed incident deadline still bounds them.
 
 The default builder retains all alert/desired-state facts, scoped resources,
 instructions, unresolved questions, platform payload, latest observations per

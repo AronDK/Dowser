@@ -36,9 +36,15 @@ execution even if the outcome later fails or becomes unknown. A plugin-defined
 procedure counts as one declared change; its steps have individual recorded outcomes.
 Observation, remediation, and recovery all pass the same gate.
 
-Each decision round includes candidate construction, context checking, one decision,
-and an optional action or wait. Limits prevent endless ineffective observation,
-failed changes, model calls, and waiting. The action timeout is the minimum of its
+Each decision round includes candidate construction, context checking, one provider
+call, and the returned decision or ordered decision batch. Decision volume per
+response is constrained by the selected model's provider-advertised capability.
+The harness has no fixed count limit on rounds across an incident. It validates the
+whole batch before execution, then revalidates and verifies each selected action
+serially. Resolution ends processing immediately; failed execution/parsing refreshes
+the model's view before further decisions. A final wait or escalation is permitted.
+Elapsed deadlines, identical-action limits, and change budgets bound waiting and
+execution independently of model capacity. The action timeout is the minimum of its
 declared timeout, the global tool timeout, and the remaining incident duration.
 Provider and other extension calls are bounded by the remaining incident duration.
 If required context cannot fit, the incident escalates with an explicit reason before
@@ -74,7 +80,7 @@ Raw artifact references are checked against the same incident. SQLite triggers p
 event/artifact updates and deletes through the store connection.
 
 Recorded event kinds include ingestion, state transitions, validation, context checks,
-candidate snapshots, provider requests/results/failures, execution starts/results,
+candidate snapshots, provider capabilities/requests/results/failures, execution starts/results,
 unknown outcomes, raw output, parse outcomes, procedure steps, verification, waits,
 runtime failures, and termination. Event references are `INCIDENT_ID:SEQUENCE`; raw
 references are `INCIDENT_ID/EXECUTION_ID/raw`; observations also have stable IDs.
