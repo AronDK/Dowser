@@ -11,8 +11,8 @@ Configuration rejects unknown fields. These are the provided factories:
 | --- | --- | --- |
 | event_store | `dowser.store:sqlite_store` | `path` (default `.local/history.sqlite3`) |
 | tool_registry | `dowser.core:tool_registry` | `plugins`: list of factory references |
-| context_builder | `dowser.core:context_builder` | `recent_outcomes` (default 4) |
-| decision_provider | `plugins.vllm:decision_provider` or your adapter | Deployment profile and private endpoint settings |
+| context_builder | `dowser.core:context_builder` | `recent_outcomes` (default 4), `memory_bytes` (default 8192) |
+| decision_provider | `plugins.vllm:decision_provider`, `plugins.jev:decision_provider`, or your adapter | Deployment profile/endpoint settings or [Jev settings](jev.md) |
 | validation_policy | `dowser.core:validation_policy` | `allow_changes` (false), `allowed_resources` (null), `severity_rules` / `priority_rules` (null) |
 | executor | `dowser.core:executor` | Empty |
 | verifier | `dowser.core:verifier` | Empty |

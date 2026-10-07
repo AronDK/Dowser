@@ -5,6 +5,31 @@ import inspect
 import threading
 from collections.abc import Callable
 
+WAKE_INTERVAL = 0.01
+
+
+async def worker_result(future, seconds):
+    """Bound socket-independent wakeups as well as the extension's deadline.
+
+    Some restricted environments reject asyncio's cross-thread self-pipe send.
+    Callbacks remain queued, so a short timer lets the owner receive them without
+    waiting for the entire extension deadline. Normal socket wakeups remain fast.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = None if seconds is None else loop.time() + seconds
+    while True:
+        remaining = None if deadline is None else deadline - loop.time()
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError("extension call exceeded deadline")
+        done, _ = await asyncio.wait(
+            {future},
+            timeout=WAKE_INTERVAL
+            if remaining is None
+            else min(WAKE_INTERVAL, remaining),
+        )
+        if done:
+            return future.result()
+
 
 async def bounded_call(fn: Callable, *args, seconds: float):
     """Run in a daemon worker with its own loop, never await cancellation cleanup.
@@ -48,10 +73,7 @@ async def bounded_call(fn: Callable, *args, seconds: float):
 
     threading.Thread(target=run, daemon=True, name="dowser-extension").start()
     try:
-        done, _ = await asyncio.wait({future}, timeout=seconds)
-        if not done:
-            raise TimeoutError("extension call exceeded deadline")
-        return future.result()
+        return await worker_result(future, seconds)
     finally:
         if not future.done():
             future.cancel()
@@ -79,6 +101,11 @@ class PersistentWorker:
 
     def _run(self):
         asyncio.set_event_loop(self.loop)
+
+        def heartbeat():
+            self.loop.call_later(WAKE_INTERVAL, heartbeat)
+
+        heartbeat()
         try:
             self.loop.run_forever()
         finally:
@@ -110,10 +137,7 @@ class PersistentWorker:
             asyncio.run_coroutine_threadsafe(invoke(), self.loop)
         )
         try:
-            done, _ = await asyncio.wait({future}, timeout=seconds)
-            if not done:
-                raise TimeoutError("extension call exceeded deadline")
-            value, error = future.result()
+            value, error = await worker_result(future, seconds)
             if error is not None:
                 raise error
             return value

@@ -226,7 +226,12 @@ INTERFACES = {
     "scheduler": {"select": 1},
 }
 INTERFACES["tool_plugin"] = INTERFACES["tool_registry"]
-OPTIONAL_INTERFACES = {"decision_provider": {"capabilities": 0}}
+OPTIONAL_INTERFACES = {
+    "decision_provider": {"capabilities": 0},
+    "tool_plugin": {"action_identity": 2, "extract_memory": 2},
+    "tool_registry": {"action_identity": 2},
+    "event_store": {"action_count": 2, "memory": 3, "cached_reads": 1},
+}
 
 
 def factory(

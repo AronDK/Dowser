@@ -17,6 +17,7 @@ from .config import (
     read_config,
     validate_config,
 )
+from .diagnostics import failure_details
 from .intake import IntakeRunner
 from .models import normalize_incident
 from .store import reject_credentials
@@ -94,7 +95,11 @@ def main(argv=None):
         return 130
     except BaseException as exc:
         # Error details live in typed durable events; adapters can leak secrets in strings.
-        error = {"error": "operation failed", "error_type": type(exc).__name__}
+        error = {
+            "error": "operation failed",
+            "error_type": type(exc).__name__,
+            "failure": failure_details(exc),
+        }
         if isinstance(exc, ConfigurationError):
             error["error"] = str(exc)
         elif isinstance(exc, ValidationError):

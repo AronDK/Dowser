@@ -6,12 +6,15 @@ verification, with SQLite history. Read the [architecture blog](https://akeness.
 The core Python package lives in `dowser/`. The `plugins/` package includes NX-OS diagnostics, restricted interface fixes, and
 vLLM decision-provider and managed-service adapters. See the [platform guide](docs/platforms.md).
 
+The optional [Jev provider](docs/jev.md) supports the
+[ITBench-AA public-subset evaluation](docs/itbench-aa.md) through `dowser-bench`.
+
 ## Install
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```sh
-git clone https://github.com/AronDK/FireFighter.git Dowser
+git clone https://github.com/AronDK/Dowser.git
 cd Dowser
 uv sync --locked
 ```

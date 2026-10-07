@@ -130,3 +130,93 @@ These checks cover schema/scope enforcement, safe runtime ownership, procedure
 outcomes, readiness, performance windows and harness integration. NX-OS fixtures
 are simulated structured responses; no real-device, GPU, model-quality, deployment,
 or performance benchmark claims follow. Optional read-only lab checks were not run.
+
+## ITBench-AA evaluation (2026-10-07)
+
+The optional native Jev adapter and `dowser-bench` runner were merged from the
+earlier worktree into the main checkout, preserving the existing platform adapters.
+The runtime worker wake-up fix and its regression tests are included. See the
+[Jev guide](jev.md) and [evaluation guide](itbench-aa.md).
+
+Verification passed 83 tracked tests and all 116 private core tests. The updated
+26-test benchmark suite, including the simulated ten-pilot plus 120-trial campaign
+and immediate pilot halt on provider failure, also passed. A private signal test
+now waits for CLI initialization instead of relying on a fixed startup delay.
+Lint, formatting, lock validation, compilation, package builds and package-content
+checks passed.
+
+All 3,799 files at revision `76df38a82288f75ba9e41dc8c515033332497473`, all
+40 snapshot indexes, and all 40 initial contexts were verified. The live campaign
+`jev-1130-20261006` started, but pilot scenario 8 escalated after call 8 raised
+`JevError`. The evaluation is incomplete: one pilot trial terminated and no
+full-run trial started. There is no full-run score. Seven calls have known usage;
+one retains its full reservation. Accounted spending is $0.004398198 of $20.
+
+The failed request passes offline schema, candidate-count, context-size and
+credential-exclusion checks. The existing adapter records only the exception type;
+the precise HTTP, transport or invalid-response cause cannot be recovered from
+the stored artifacts. The failed trial was preserved without inference retries,
+fallback or replay. Further trials require resolving the provider failure and
+explicitly recording any changed implementation or replacement-pilot provenance.
+
+The frozen manifest, pricing source, complete preparation status, preflight,
+history, ledger, scoring, JSONL/CSV results, `summary.md`, `execution-status.md`
+and `failure-analysis.json` are under `.local/itbench-aa/jev-1130-20261006/`.
+The earlier worktree and its original artifacts remain intact.
+
+The user subsequently authorized persistent structured diagnostics, bounded
+HTTP 429/529 retries with TypeSafe-recommended exponential backoff, and a rerun.
+The total spending ceiling is now $15, including previous accounted spending.
+The original source is archived under the first campaign's `source/` directory.
+A new campaign carries its frozen spending snapshot forward and retains the
+original failed trial. See the updated evaluation and Jev guides.
+
+## Cumulative memory correction — 2026-10-07
+
+The original SQLite event log existed, but the ITBench context builder explicitly
+removed all attempts and retained only the latest investigation observation.
+Revision-bearing arguments defeated exact-argument repetition checks. Existing
+tests validated storage and simulated execution, not actual model use of history.
+The completed SDK campaign recorded 120 full trials (2/120 exact accuracy), with
+106 call-limit failures, 7 submissions and 7 provider failures; cumulative accounted
+cost was $3.379047336. Those artifacts remain unchanged.
+
+The user authorized cumulative SQLite memory, semantic identities, recall, scoped
+related-alert retrieval and real Jev validation. They explicitly removed the $15
+ceiling. New campaigns have no spending or call-count ceiling; accounting and the
+80 requests/s and 100,000 tokens/s hard caps remain. SOM controls decisions; a
+30-minute watchdog reports incomplete execution. See [memory behavior and
+validation](memory.md). The authorized live scope is focused paired tests and ten
+pilot cases, without replay or a new full campaign. ALFworld is subsequent work.
+
+Real Jev memory validation passed 30/30 paired decisions; memory-omitted controls
+scored 9/15 (45 actual HTTP calls total). The ten-case pilot is supervised under
+`.local/itbench-aa/jev-memory-20261007-native/`. Its first case ended by model
+escalation after 11 calls and zero repeated evidence reads. A reporting-only
+classification fix corrected successful context trimming being treated as fatal;
+the first paid trial remains untouched and is not replayed. The original source
+and approved reporting revision are archived. Read current local supervisor
+status for final results; the model/loop/plugin execution files stay frozen.
+
+## User stop and publication — 2026-10-07
+
+The user explicitly ended testing. The pilot process was interrupted and its
+completion notifier cancelled; no paid trial was restarted or replayed.
+Four pilot cases finished: two model escalations (scenarios 8 and 2), one correct
+submission (scenario 19), and one provider deadline failure (scenario 17). Exact
+accuracy across these four cases and their mean score are both 25% (1/4).
+Scenario 16 was interrupted during investigation and is a partial fifth case,
+excluded from that four-case accuracy. The ten-case pilot remains incomplete.
+
+Real Jev memory validation remains 30/30 correct, with 9/15 controls. The refreshed
+local ledger includes 1299 pilot HTTP attempts, including the partial fifth case,
+and cumulative accounted cost of $4.112606652 including earlier campaigns and
+unknown reservations. Reports/history/ledger stay in the gitignored local run
+directory. Testing is paused: do not auto-resume or start full ITBench/ALFworld.
+
+The user authorized committing and pushing the implemented Jev provider, retries,
+structured diagnostics, rate limiting, accounting, ITBench tools/runner, SQLite
+cumulative memory, semantic repetition/recall, tests and documentation. Existing
+verification and real-model validation are recorded above; no regression suites
+were repeated during this stop/publication task. Credentials, datasets and runtime
+artifacts remain local.

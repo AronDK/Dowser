@@ -6,7 +6,8 @@ import threading
 from pathlib import Path
 
 from .contracts import AppContext, Component, factory
-from .models import Boundary, Event, IncidentState, now
+from .memory import action_identity, compact, facts_from_parse, scope_key
+from .models import ActionCandidate, Boundary, Event, IncidentState, ParseResult, now
 
 
 class ExistingIncidentError(ValueError):
@@ -56,7 +57,7 @@ class SQLiteStore(Component):
 
     def _initialize(self):
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1):
+        if version not in (0, 1, 2):
             raise ValueError("unsupported SQLite store schema version")
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA journal_mode=WAL")
@@ -85,7 +86,105 @@ class SQLiteStore(Component):
             CREATE TRIGGER IF NOT EXISTS immutable_artifacts_delete BEFORE DELETE ON artifacts
             BEGIN SELECT RAISE(ABORT, 'artifacts are append-only'); END;
         """)
-        self.connection.execute("PRAGMA user_version=1")
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS memory_scopes (incident_id TEXT PRIMARY KEY REFERENCES incidents(incident_id), scope TEXT NOT NULL)"
+            )
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS memory_scope_lookup ON memory_scopes(scope)"
+            )
+            self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS memory_facts (incident_id TEXT NOT NULL, sequence INTEGER NOT NULL, item INTEGER NOT NULL, fact_key TEXT NOT NULL, resource_id TEXT NOT NULL, payload TEXT NOT NULL, refs TEXT NOT NULL, status TEXT NOT NULL, PRIMARY KEY(incident_id,sequence,item), FOREIGN KEY(incident_id,sequence) REFERENCES events(incident_id,sequence))"
+            )
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS memory_fact_lookup ON memory_facts(incident_id,fact_key,sequence)"
+            )
+            self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS memory_actions (incident_id TEXT NOT NULL, sequence INTEGER NOT NULL, execution_id TEXT NOT NULL, identity TEXT NOT NULL, version TEXT NOT NULL, decision_state TEXT NOT NULL, tool TEXT NOT NULL, args TEXT NOT NULL, status TEXT NOT NULL, parse_status TEXT, PRIMARY KEY(incident_id,execution_id), FOREIGN KEY(incident_id,sequence) REFERENCES events(incident_id,sequence))"
+            )
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS memory_action_lookup ON memory_actions(incident_id,identity,version,decision_state)"
+            )
+            columns = {
+                row[1]
+                for row in self.connection.execute("PRAGMA table_info(memory_actions)")
+            }
+            if "detail" not in columns:
+                self.connection.execute(
+                    "ALTER TABLE memory_actions ADD COLUMN detail TEXT NOT NULL DEFAULT '{}'"
+                )
+            if version < 2:
+                for incident, sequence, kind, payload in self.connection.execute(
+                    "SELECT incident_id,sequence,kind,payload FROM events ORDER BY incident_id,sequence"
+                ).fetchall():
+                    self._project(incident, sequence, kind, json.loads(payload))
+            self.connection.execute("PRAGMA user_version=2")
+
+    def _project(self, incident, sequence, kind, payload):
+        facts = []
+        if kind == "incident_ingested":
+            state = IncidentState.model_validate(payload["state"])
+            self.connection.execute(
+                "INSERT INTO memory_scopes VALUES (?,?)", (incident, scope_key(state))
+            )
+            facts = facts_from_parse(
+                ParseResult(
+                    status="valid",
+                    parser_version="memory/1",
+                    observations=state.observations,
+                )
+            )
+        elif kind == "execution_started":
+            candidate = ActionCandidate.model_validate(payload["candidate"])
+            identity = payload.get("identity", action_identity(candidate).model_dump())
+            self.connection.execute(
+                "INSERT INTO memory_actions(incident_id,sequence,execution_id,identity,version,decision_state,tool,args,status,parse_status) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    incident,
+                    sequence,
+                    payload["execution_id"],
+                    identity["key"],
+                    identity.get("evidence_version", ""),
+                    identity.get("decision_state", ""),
+                    candidate.tool,
+                    json.dumps(candidate.args),
+                    "unknown",
+                    None,
+                ),
+            )
+        elif kind == "execution_result":
+            self.connection.execute(
+                "UPDATE memory_actions SET status=?,parse_status=?,detail=? WHERE incident_id=? AND execution_id=?",
+                (
+                    payload["status"],
+                    payload["parse"]["status"],
+                    json.dumps(
+                        {
+                            "execution": payload.get("detail", ""),
+                            "parse": payload["parse"].get("reason", ""),
+                        }
+                    ),
+                    incident,
+                    payload["execution_id"],
+                ),
+            )
+        elif kind == "parse_outcome":
+            facts = facts_from_parse(ParseResult.model_validate(payload["parse"]))
+        for item, fact in enumerate(facts):
+            self.connection.execute(
+                "INSERT INTO memory_facts VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    incident,
+                    sequence,
+                    item,
+                    fact.key,
+                    fact.resource_id,
+                    json.dumps(fact.payload),
+                    json.dumps(fact.evidence_refs),
+                    fact.status,
+                ),
+            )
 
     def _append(self, incident_id, kind, payload, artifacts=None):
         reject_credentials(payload)
@@ -143,7 +242,132 @@ class SQLiteStore(Component):
                 "INSERT INTO artifacts VALUES (?,?,?,?)",
                 (ref, incident_id, sequence, json.dumps(artifact)),
             )
+        self._project(incident_id, sequence, kind, payload)
         return event
+
+    async def action_count(self, incident_id, identity):
+        with self.lock:
+            return self.connection.execute(
+                "SELECT COUNT(*) FROM memory_actions WHERE incident_id=? AND identity=? AND version=? AND decision_state=?",
+                (
+                    incident_id,
+                    identity.key,
+                    identity.evidence_version,
+                    identity.decision_state,
+                ),
+            ).fetchone()[0]
+
+    async def memory(self, state, candidates, limit=12):
+        """Only explicit equal scopes can retrieve another incident's evidence."""
+        with self.lock:
+            scope = self.connection.execute(
+                "SELECT scope FROM memory_scopes WHERE incident_id=?",
+                (state.incident_id,),
+            ).fetchone()
+            if scope and scope[0] != scope_key(state):
+                raise ValueError("memory lookup changed incident scope")
+            # Also supports assembling a related new alert before it is ingested.
+            scope = scope[0] if scope else scope_key(state)
+            incidents = [
+                r[0]
+                for r in self.connection.execute(
+                    "SELECT incident_id FROM memory_scopes WHERE scope=?", (scope,)
+                )
+            ]
+            if not incidents:
+                return {
+                    "facts": [],
+                    "actions": [],
+                    "progress": {"actions": 0, "facts": 0},
+                    "historical": False,
+                }
+            marks = ",".join("?" for _ in incidents)
+            rows = self.connection.execute(
+                f"SELECT incident_id,sequence,fact_key,resource_id,payload,refs,status FROM memory_facts WHERE incident_id IN ({marks}) ORDER BY rowid DESC",
+                incidents,
+            ).fetchall()
+            actions = self.connection.execute(
+                f"SELECT incident_id,sequence,identity,tool,args,status,parse_status,detail FROM memory_actions WHERE incident_id IN ({marks}) ORDER BY rowid DESC",
+                incidents,
+            ).fetchall()
+        relevant = {c.args.get("entity") for c in candidates if c.args.get("entity")}
+        # Related focus first, followed by recent cumulative findings. Conflicts
+        # retain both values, rather than silently treating the latest as truth.
+        latest, conflicts, facts = {}, set(), []
+        for incident, seq, key, resource, payload, refs, status in rows:
+            value = json.loads(payload)
+            fact = {
+                "key": key,
+                "resource_id": resource,
+                "payload": compact(value),
+                "evidence_refs": json.loads(refs),
+                "event_ref": f"{incident}:{seq}",
+                "historical": incident != state.incident_id,
+                "freshness": "revalidation_required"
+                if incident != state.incident_id
+                else "current_incident",
+                "status": status,
+            }
+            prior = latest.get(key)
+            if prior is not None:
+                if prior["value"] != value:
+                    conflicts.add(key)
+                    fact["status"] = "contradicted"
+                    prior["fact"]["status"] = "contradicted"
+                    facts.append(fact)
+                continue
+            latest[key] = {"value": value, "fact": fact}
+            facts.append(fact)
+        facts.sort(
+            key=lambda f: (
+                f["status"] == "contradicted",
+                f["payload"].get("entity") in relevant,
+            ),
+            reverse=True,
+        )
+        selected = facts[:limit]
+        recent = [
+            {
+                "event_ref": f"{incident}:{seq}",
+                "identity": ident,
+                "tool": tool,
+                "args": compact(json.loads(args), 350),
+                "status": status,
+                "parse_status": parsed,
+                "detail": compact(json.loads(detail), 350),
+                "historical": incident != state.incident_id,
+            }
+            for incident, seq, ident, tool, args, status, parsed, detail in actions[:8]
+        ]
+        return {
+            "facts": selected,
+            "actions": recent,
+            "progress": {
+                "actions": len(actions),
+                "current_incident_actions": sum(
+                    a[0] == state.incident_id for a in actions
+                ),
+                "facts": len(latest),
+                "omitted_facts": max(0, len(facts) - len(selected)),
+                "contradictions": sorted(conflicts)[:12],
+                "contradiction_count": len(conflicts),
+                "outcomes": {
+                    s: sum(a[5] == s for a in actions)
+                    for s in ("succeeded", "failed", "partial", "unknown")
+                },
+            },
+            "historical": any(f["historical"] for f in selected)
+            or any(a["historical"] for a in recent),
+        }
+
+    async def cached_reads(self, incident_id):
+        """Return successful read artifacts only; changes/unknowns never replay."""
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT a.identity,r.payload FROM memory_actions a JOIN events e ON e.incident_id=a.incident_id AND e.sequence=a.sequence JOIN artifacts r ON r.incident_id=a.incident_id AND r.ref=a.incident_id || '/' || a.execution_id || '/raw' WHERE a.incident_id=? AND a.status='succeeded' AND a.parse_status='valid' AND json_extract(e.payload,'$.candidate.effect')='read_only'",
+                (incident_id,),
+            ).fetchall()
+        return {key: json.loads(payload) for key, payload in rows}
 
     async def ingest(self, state):
         with self.lock, self.connection:

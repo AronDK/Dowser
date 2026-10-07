@@ -10,11 +10,14 @@ requires-python = ">=3.12"
 dependencies = ["pydantic>=2.10,<3"]
 
 [project.optional-dependencies]
+jev = ["httpx>=0.28,<1", "python-dotenv>=1.0,<2"]
+itbench-aa = ["huggingface-hub>=1.0,<2", "PyYAML>=6,<7"]
 nxos = ["httpx>=0.28,<1", "asyncssh>=2.20,<3"]
 vllm = ["httpx>=0.28,<1", "prometheus-client>=0.21,<1"]
 
 [project.scripts]
 dowser = "dowser.cli:main"
+dowser-bench = "dowser.bench:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["dowser", "plugins"]

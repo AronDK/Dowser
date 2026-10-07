@@ -56,6 +56,32 @@ class Observation(Boundary):
         return self
 
 
+class MemoryScope(Boundary):
+    namespace: str = Field(min_length=1)
+    partition: str = Field(min_length=1)
+
+
+class MemoryFact(Boundary):
+    key: str = Field(min_length=1)
+    resource_id: str = Field(min_length=1)
+    payload: dict[str, JsonValue]
+    evidence_refs: list[str] = Field(default_factory=list)
+    status: Literal["observed", "contradicted", "superseded"] = "observed"
+
+
+class ActionIdentity(Boundary):
+    key: str = Field(min_length=1)
+    evidence_version: str = ""
+    decision_state: str = ""
+
+
+class InvestigationMemory(Boundary):
+    facts: list[dict[str, JsonValue]] = Field(default_factory=list)
+    actions: list[dict[str, JsonValue]] = Field(default_factory=list)
+    progress: dict[str, JsonValue] = Field(default_factory=dict)
+    historical: bool = False
+
+
 class IncidentState(Boundary):
     schema_version: Literal["1"] = "1"
     incident_id: str = Field(min_length=1)
@@ -68,6 +94,7 @@ class IncidentState(Boundary):
     unresolved_questions: list[str] = Field(default_factory=list)
     phase: Phase = "observe"
     payload: dict[str, JsonValue] = Field(default_factory=dict)
+    memory_scope: MemoryScope | None = None
 
     @model_validator(mode="after")
     def unique_resources(self):
@@ -174,6 +201,7 @@ class DecisionRequest(Boundary):
     incident_id: str
     state: IncidentState
     candidates: list[ActionCandidate]
+    memory: InvestigationMemory | None = None
 
 
 class ContextCheck(Boundary):
@@ -271,10 +299,11 @@ class ParseResult(Boundary):
     parser_version: str
     observations: list[Observation] = Field(default_factory=list)
     reason: str = ""
+    memory_facts: list[MemoryFact] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def evidence_only_on_valid(self):
-        if self.status != "valid" and self.observations:
+        if self.status != "valid" and (self.observations or self.memory_facts):
             raise ValueError("failed parsing cannot emit observations")
         return self
 

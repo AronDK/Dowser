@@ -1,14 +1,16 @@
 """One-incident orchestration with durable authorization and outcome boundaries."""
 
 import asyncio
-import json
 import time
 from itertools import count
 
 from .contracts import Component, factory
 from .core import EmptySettings, required_view
+from .diagnostics import failure_details
+from .memory import action_identity
 from .models import (
     ActionCandidate,
+    ActionIdentity,
     ContextCheck,
     DecisionBatch,
     DecisionCapabilities,
@@ -56,6 +58,8 @@ class DefaultIncidentLoop(Component):
         verifier = self.services["verifier"]
         deadline = time.monotonic() + self.limits.incident_seconds
         attempts = {}
+        identities = {}
+        minimum_memory = None
         changes = 0
         pending_recovery = None
         active = None
@@ -91,15 +95,23 @@ class DefaultIncidentLoop(Component):
             await record("terminated", result.model_dump(mode="json"))
             return result
 
-        def key(candidate):
-            return json.dumps(
-                [candidate.tool, candidate.args], sort_keys=True, separators=(",", ":")
-            )
-
         async def gate(candidate, stage):
+            identity_hook = getattr(registry, "action_identity", None)
+            identity = ActionIdentity.model_validate(
+                await call(identity_hook, candidate, state)
+                if identity_hook
+                else action_identity(candidate)
+            )
+            identities[candidate.id] = identity
+            count_hook = getattr(store, "action_count", None)
+            attempted = (
+                await count_hook(state.incident_id, identity)
+                if count_hook
+                else attempts.get(identity.key, 0)
+            )
             budget = {
                 "seconds_remaining": remaining(),
-                "attempts": attempts.get(key(candidate), 0),
+                "attempts": attempted,
                 "changes": changes,
             }
             if budget["seconds_remaining"] <= 0:
@@ -157,6 +169,7 @@ class DefaultIncidentLoop(Component):
                 "unresolved_questions",
                 "payload",
                 "phase",
+                "memory_scope",
             ):
                 if getattr(request.state, field) != getattr(state, field):
                     raise ValueError(
@@ -170,6 +183,26 @@ class DefaultIncidentLoop(Component):
             required.update({o.id: o for o in state.observations if o.id in needed_ids})
             if any(available.get(oid) != value for oid, value in required.items()):
                 raise ValueError("context builder removed required observations")
+            if minimum_memory is not None:
+                if request.memory is None:
+                    raise ValueError("context builder removed cumulative memory")
+                if (
+                    any(
+                        request.memory.progress.get(k) != v
+                        for k, v in minimum_memory.progress.items()
+                        if k != "omitted_facts"
+                    )
+                    or any(
+                        f not in request.memory.facts for f in minimum_memory.facts[:2]
+                    )
+                    or any(
+                        a not in request.memory.actions
+                        for a in minimum_memory.actions[:1]
+                    )
+                ):
+                    raise ValueError(
+                        "context builder removed essential cumulative progress"
+                    )
             reject_credentials(request.model_dump(mode="json"))
 
         # Duplicate IDs fail before entering the failure handler: do not alter old history.
@@ -213,6 +246,7 @@ class DefaultIncidentLoop(Component):
                         )
                     )
                 await phase("select")
+                minimum_memory = None
                 request = DecisionRequest.model_validate(
                     await call(
                         builder.build,
@@ -221,6 +255,11 @@ class DefaultIncidentLoop(Component):
                     )
                 )
                 protected(request, allowed)
+                minimum_memory = (
+                    request.memory.model_copy(deep=True)
+                    if request.memory is not None
+                    else None
+                )
                 seen_contexts = set()
                 while True:
                     serialized = request.model_dump_json()
@@ -243,6 +282,7 @@ class DefaultIncidentLoop(Component):
                             {
                                 "stage": "context_check",
                                 "error_type": type(exc).__name__,
+                                "failure": failure_details(exc),
                             },
                         )
                         return await terminate("provider context check failed")
@@ -332,7 +372,11 @@ class DefaultIncidentLoop(Component):
                         raise
                     await record(
                         "provider_failure",
-                        {"stage": "decision", "error_type": type(exc).__name__},
+                        {
+                            "stage": "decision",
+                            "error_type": type(exc).__name__,
+                            "failure": failure_details(exc),
+                        },
                     )
                     return await terminate(
                         "provider failed or returned an invalid selection"
@@ -385,9 +429,15 @@ class DefaultIncidentLoop(Component):
                     }
                     await record(
                         "execution_started",
-                        {**active, "candidate": selected.model_dump(mode="json")},
+                        {
+                            **active,
+                            "candidate": selected.model_dump(mode="json"),
+                            "identity": identities[selected.id].model_dump(mode="json"),
+                        },
                     )
-                    attempts[key(selected)] = attempts.get(key(selected), 0) + 1
+                    attempts[identities[selected.id].key] = (
+                        attempts.get(identities[selected.id].key, 0) + 1
+                    )
                     changes += int(selected.effect == "change")
                     try:
                         transport = TransportResult.model_validate(
@@ -475,6 +525,9 @@ class DefaultIncidentLoop(Component):
                             if any(
                                 o.resource_id not in selected.resources
                                 for o in parsed.observations
+                            ) or any(
+                                f.resource_id not in selected.resources
+                                for f in parsed.memory_facts
                             ):
                                 raise ValueError(
                                     "parsed observation outside action scope"
@@ -488,6 +541,11 @@ class DefaultIncidentLoop(Component):
                                 raise ValueError("duplicate observation ID")
                             for observation in parsed.observations:
                                 observation.evidence_refs = list(raw_refs)
+                            for fact in parsed.memory_facts:
+                                fact.evidence_refs = [
+                                    *raw_refs,
+                                    *(o.id for o in parsed.observations),
+                                ]
                         except TimeoutError:
                             raise  # Incident deadline is authoritative even during parsing.
                         except Exception:
@@ -619,6 +677,7 @@ class DefaultIncidentLoop(Component):
                 "runtime_failure",
                 {
                     "error_type": type(exc).__name__,
+                    "failure": failure_details(exc),
                     "execution_id": active["execution_id"] if active else None,
                 },
             )

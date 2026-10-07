@@ -4,10 +4,13 @@ from pydantic import BaseModel, Field
 
 from .config import FactoryReference, check_component, load_factory
 from .contracts import Component, ToolSpec, factory
+from .memory import action_identity
 from .models import (
     ActionCandidate,
+    ActionIdentity,
     Boundary,
     DecisionRequest,
+    InvestigationMemory,
     ValidationResult,
     VerificationResult,
     alert_value,
@@ -128,7 +131,20 @@ class DefaultRegistry(Component):
 
     async def parse(self, candidate, result):
         _, plugin = self.binding(candidate)
-        return await plugin.parse(candidate, result)
+        parsed = await plugin.parse(candidate, result)
+        extract = getattr(plugin, "extract_memory", None)
+        if extract is not None and parsed.status == "valid":
+            parsed.memory_facts = await extract(candidate, parsed)
+        return parsed
+
+    async def action_identity(self, candidate, state):
+        _, plugin = self.binding(candidate)
+        hook = getattr(plugin, "action_identity", None)
+        return (
+            ActionIdentity.model_validate(await hook(candidate, state))
+            if hook
+            else action_identity(candidate)
+        )
 
     async def verify(self, state, candidate, result):
         _, plugin = self.binding(candidate)
@@ -158,6 +174,7 @@ class DefaultRegistry(Component):
     subsystem="tool_registry",
     component_type=DefaultRegistry,
     settings_model=RegistrySettings,
+    dependencies=("event_store",),
 )
 async def tool_registry(settings, context):
     plugins = []
@@ -187,6 +204,7 @@ async def tool_registry(settings, context):
 
 class ContextSettings(Boundary):
     recent_outcomes: int = Field(default=4, ge=0)
+    memory_bytes: int = Field(default=8192, ge=1024)
 
 
 def required_view(state):
@@ -199,8 +217,9 @@ def required_view(state):
 
 
 class DefaultContextBuilder(Component):
-    def __init__(self, settings):
+    def __init__(self, settings, store=None):
         self.settings = settings
+        self.store = store
 
     async def build(self, state, candidates):
         view = state.model_copy(deep=True)
@@ -219,25 +238,73 @@ class DefaultContextBuilder(Component):
             if self.settings.recent_outcomes
             else []
         )
+        memory = None
+        if self.store is not None:
+            lookup = getattr(self.store, "memory", None)
+            if lookup:
+                memory = InvestigationMemory.model_validate(
+                    await lookup(state, candidates)
+                )
+            else:
+                # Legacy stores still supply cumulative outcomes via history.
+                events = await self.store.history(state.incident_id)
+                outcomes = [e for e in events if e.kind == "execution_result"]
+                memory = InvestigationMemory(
+                    actions=[
+                        {
+                            "event_ref": f"{e.incident_id}:{e.sequence}",
+                            "tool": e.payload["tool"],
+                            "status": e.payload["status"],
+                        }
+                        for e in outcomes[-8:]
+                    ],
+                    progress={"actions": len(outcomes)},
+                )
+            while len(memory.model_dump_json().encode()) > self.settings.memory_bytes:
+                if len(memory.facts) > 2:
+                    memory.facts.pop()
+                    memory.progress["omitted_facts"] = (
+                        int(memory.progress.get("omitted_facts", 0)) + 1
+                    )
+                elif len(memory.actions) > 1:
+                    memory.actions.pop()
+                else:
+                    raise ValueError(
+                        "essential cumulative memory exceeds context budget"
+                    )
         return DecisionRequest(
-            incident_id=state.incident_id, state=view, candidates=candidates
+            incident_id=state.incident_id,
+            state=view,
+            candidates=candidates,
+            memory=memory,
         )
 
     async def trim(self, request):
-        if not request.state.attempts:
-            return None
         request = request.model_copy(deep=True)
-        request.state.attempts = request.state.attempts[1:]
-        return request
+        if request.state.attempts:
+            request.state.attempts = request.state.attempts[1:]
+            return request
+        if request.memory is not None:
+            if len(request.memory.facts) > 2:
+                request.memory.facts.pop()
+                request.memory.progress["omitted_facts"] = (
+                    int(request.memory.progress.get("omitted_facts", 0)) + 1
+                )
+                return request
+            if len(request.memory.actions) > 1:
+                request.memory.actions.pop()
+                return request
+        return None
 
 
 @factory(
     subsystem="context_builder",
     component_type=DefaultContextBuilder,
     settings_model=ContextSettings,
+    dependencies=("event_store",),
 )
 def context_builder(settings, context):
-    return DefaultContextBuilder(settings)
+    return DefaultContextBuilder(settings, context.require("event_store"))
 
 
 class PolicySettings(Boundary):
