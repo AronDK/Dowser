@@ -31,14 +31,14 @@ class RateLimiter:
         self.lock = threading.Lock()
         self.window = deque()
 
-    async def acquire(self, tokens, deadline):
+    async def acquire(self, tokens, deadline=None):
         if type(tokens) is not int or not 0 <= tokens <= self.tokens_per_second:
             raise ValueError("request exceeds token rate allowance")
         started = self.clock()
         while True:
             with self.lock:
                 current = self.clock()
-                if current >= deadline:
+                if deadline is not None and current >= deadline:
                     raise TimeoutError("rate admission exceeded provider deadline")
                 while self.window and self.window[0].started <= current - 1:
                     self.window.popleft()
@@ -51,7 +51,7 @@ class RateLimiter:
                     self.window.append(ticket)
                     return ticket
                 delay = max(0.001, self.window[0].started + 1 - current)
-                if current + delay >= deadline:
+                if deadline is not None and current + delay >= deadline:
                     raise TimeoutError("rate admission exceeded provider deadline")
             await self.sleeper(delay)
 

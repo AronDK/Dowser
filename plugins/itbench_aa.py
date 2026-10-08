@@ -38,7 +38,6 @@ from dowser.models import (
     VerificationResult,
 )
 from dowser.rate_limit import shared_rate_limiter
-from dowser.runtime import bounded_call
 from plugins.jev import JevProvider, JevSettings, create_escalation_policy
 
 REASONS = [
@@ -61,6 +60,9 @@ class Settings(Boundary):
 
 
 class ProviderSettings(JevSettings):
+    decision_timeout_seconds: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False
+    )
     strict_probabilities: bool = False
     ledger: str
     trial: str = Field(pattern=r"^[a-zA-Z0-9_-]+$")
@@ -649,6 +651,9 @@ class BudgetedProvider(Component):
     def success(self, call_id, usage, latency):
         self.ledger.reconcile(call_id, usage, latency)
 
+    def timing(self, call_id, spans):
+        self.ledger.timing(call_id, spans)
+
     def failure(self, call_id, error, latency):
         self.ledger.failure(call_id, error, latency)
 
@@ -670,9 +675,7 @@ class BudgetedProvider(Component):
     async def decide(self, request):
         if not (await self.check_context(request)).fits:
             raise ValueError("benchmark context exceeds limits")
-        return await bounded_call(
-            self.provider.decide, request, seconds=self.settings.timeout_seconds
-        )
+        return await self.provider.decide(request)
 
     async def aclose(self):
         await self.provider.aclose()

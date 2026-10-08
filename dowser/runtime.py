@@ -3,9 +3,12 @@
 import asyncio
 import inspect
 import threading
+import time
 from collections.abc import Callable
+from contextvars import ContextVar, copy_context
 
 WAKE_INTERVAL = 0.01
+call_deadline = ContextVar("dowser_call_deadline", default=None)
 
 
 async def worker_result(future, seconds):
@@ -40,6 +43,12 @@ async def bounded_call(fn: Callable, *args, seconds: float):
     if seconds <= 0:
         raise TimeoutError("incident deadline exhausted")
     owner = asyncio.get_running_loop()
+    inherited = call_deadline.get()
+    invocation_deadline = time.monotonic() + seconds
+    if inherited is not None:
+        invocation_deadline = min(inherited, invocation_deadline)
+    invocation_context = copy_context()
+    invocation_context.run(call_deadline.set, invocation_deadline)
     future = owner.create_future()
     worker: dict = {}
 
@@ -69,7 +78,7 @@ async def bounded_call(fn: Callable, *args, seconds: float):
             notify(error=error)
 
     def run():
-        asyncio.run(invoke())
+        invocation_context.run(asyncio.run, invoke())
 
     threading.Thread(target=run, daemon=True, name="dowser-extension").start()
     try:

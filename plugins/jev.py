@@ -15,13 +15,20 @@ from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from dowser.config import FactoryReference, load_factory
 from dowser.contracts import Component, factory
 from dowser.diagnostics import DiagnosticError, failure_details
 from dowser.models import Boundary, ContextCheck, DecisionCapabilities, DecisionResult
 from dowser.rate_limit import RateLimiter
+from dowser.runtime import call_deadline
 from dowser.store import reject_credentials
 from plugins.escalation import Policy as EscalationPolicy
 from plugins.escalation import Settings as EscalationSettings
@@ -38,7 +45,33 @@ class JevSettings(Strict):
         default="TYPESAFE_API_KEY", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"
     )
     env_file: str | None = ".env"
-    timeout_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
+    decision_timeout_seconds: float | None = Field(
+        default=30, gt=0, allow_inf_nan=False
+    )
+    attempt_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_timeout(cls, value):
+        if isinstance(value, dict) and "timeout_seconds" in value:
+            value = dict(value)
+            legacy = value.pop("timeout_seconds")
+            if (
+                "decision_timeout_seconds" in value
+                and value["decision_timeout_seconds"] != legacy
+            ):
+                raise ValueError("conflicting legacy and decision timeouts")
+            value["decision_timeout_seconds"] = legacy
+        return value
+
+    @property
+    def timeout_seconds(self):
+        return self.decision_timeout_seconds
+
+    @timeout_seconds.setter
+    def timeout_seconds(self, value):
+        self.decision_timeout_seconds = value
+
     max_retries: int = Field(default=2, ge=0, le=5)
     retry_initial_seconds: float = Field(default=0.5, gt=0, le=8, allow_inf_nan=False)
     retry_max_seconds: float = Field(default=5, gt=0, le=60, allow_inf_nan=False)
@@ -483,14 +516,24 @@ class JevProvider(Component):
             )
         httpx = optional_dependency("httpx")
         started = time.monotonic()
-        deadline = started + self.settings.timeout_seconds
+        aggregate_deadline = (
+            started + self.settings.decision_timeout_seconds
+            if self.settings.decision_timeout_seconds is not None
+            else None
+        )
+        incident_deadline = call_deadline.get()
+        deadlines = [
+            d for d in (aggregate_deadline, incident_deadline) if d is not None
+        ]
+        deadline = min(deadlines) if deadlines else None
+        spans = []
         # Reserve the full documented input ceiling plus Choice output headroom,
         # then reconcile input and output tokens together when usage is known.
         rate_tokens = 64000 + 2048
         failures = []
         async with httpx.AsyncClient(
             base_url=self.settings.endpoint,
-            timeout=self.settings.timeout_seconds,
+            timeout=httpx.Timeout(connect=5, read=30, write=10, pool=5),
             follow_redirects=False,
             trust_env=False,
         ) as client:
@@ -503,6 +546,10 @@ class JevProvider(Component):
                         code="rate_admission_deadline",
                         category="timeout",
                         stage="preparation",
+                        timeout_kind="incident"
+                        if incident_deadline is not None
+                        and time.monotonic() >= incident_deadline
+                        else "aggregate",
                     ) from None
                 try:
                     call_id = (
@@ -514,18 +561,69 @@ class JevProvider(Component):
                     self.rate_limiter.discard(admission)
                     raise
                 attempt_started = time.monotonic()
+                timing = {
+                    "admission": admission.waited,
+                    "connection": None,
+                    "send": None,
+                    "response_wait": None,
+                    "processing": None,
+                    "backoff": 0.0,
+                    "server": None,
+                }
+                trace_starts = {}
+
+                async def trace(name, info):
+                    # Never persist trace info: it can contain headers and credentials.
+                    operation, _, status = name.rpartition(".")
+                    phase = (
+                        "connection"
+                        if operation.endswith(("connect_tcp", "start_tls"))
+                        else "send"
+                        if "send_request" in operation
+                        else "response_wait"
+                        if "receive_response" in operation
+                        else None
+                    )
+                    if phase and status == "started":
+                        trace_starts[operation] = time.monotonic()
+                    elif (
+                        phase
+                        and status in {"complete", "failed"}
+                        and operation in trace_starts
+                    ):
+                        timing[phase] = (
+                            (timing[phase] or 0)
+                            + time.monotonic()
+                            - trace_starts.pop(operation)
+                        )
+
                 retry_after, retry_after_ms, known_usage = None, None, None
+                processing_started = None
                 try:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
+                    remaining = (
+                        deadline - time.monotonic() if deadline is not None else None
+                    )
+                    if remaining is not None and remaining <= 0:
                         raise TimeoutError
-                    async with asyncio.timeout(remaining):
+                    attempt_limit = (
+                        min(self.settings.attempt_timeout_seconds, remaining)
+                        if remaining is not None
+                        else self.settings.attempt_timeout_seconds
+                    )
+                    async with asyncio.timeout(attempt_limit):
                         response = await client.post(
                             "/v1/systemone",
                             json=payload,
                             headers={"Authorization": f"Bearer {key}"},
-                            timeout=remaining,
+                            timeout=httpx.Timeout(
+                                connect=min(5, attempt_limit),
+                                read=min(30, attempt_limit),
+                                write=min(10, attempt_limit),
+                                pool=min(5, attempt_limit),
+                            ),
+                            extensions={"trace": trace},
                         )
+                    processing_started = time.monotonic()
                     retry_after = response.headers.get("retry-after")
                     retry_after_ms = response.headers.get("retry-after-ms")
                     provider_id = None
@@ -574,22 +672,61 @@ class JevProvider(Component):
                         error.detail.provider_request_id = provider_id
                         raise
                 except BaseException as error:
+                    aggregate_expired = (
+                        aggregate_deadline is not None
+                        and time.monotonic() >= aggregate_deadline
+                    )
+                    incident_expired = (
+                        incident_deadline is not None
+                        and time.monotonic() >= incident_deadline
+                    )
+                    attempt_expired = isinstance(
+                        error, (TimeoutError, httpx.TimeoutException)
+                    ) and not (aggregate_expired or incident_expired)
                     if isinstance(
                         error, (TimeoutError, httpx.HTTPError, asyncio.CancelledError)
                     ):
                         error_detail = JevError(
                             "Jev request failed",
-                            code="request_cancelled"
+                            code="incident_expired"
+                            if incident_expired
+                            else "request_cancelled"
                             if isinstance(error, asyncio.CancelledError)
                             else "provider_deadline"
-                            if isinstance(error, TimeoutError)
+                            if aggregate_expired
+                            else "attempt_timeout"
+                            if attempt_expired
                             else "transport_error",
+                            timeout_kind="incident"
+                            if incident_expired
+                            else "aggregate"
+                            if aggregate_expired
+                            else "user_cancellation"
+                            if isinstance(error, asyncio.CancelledError)
+                            else "attempt"
+                            if attempt_expired
+                            else None,
                             category="timeout"
-                            if isinstance(error, TimeoutError)
+                            if isinstance(
+                                error,
+                                (
+                                    TimeoutError,
+                                    httpx.TimeoutException,
+                                    asyncio.CancelledError,
+                                ),
+                            )
                             else "transport",
                             stage="http",
                             cause_type=type(error).__name__,
-                            retryable=isinstance(error, httpx.TransportError),
+                            retryable=(
+                                attempt_expired
+                                or isinstance(error, httpx.TransportError)
+                            )
+                            and not (
+                                aggregate_expired
+                                or incident_expired
+                                or isinstance(error, asyncio.CancelledError)
+                            ),
                         )
                     else:
                         error_detail = error
@@ -609,7 +746,10 @@ class JevProvider(Component):
                     retry = (
                         delay is not None
                         and attempt <= self.settings.max_retries
-                        and delay + 0.05 < deadline - time.monotonic()
+                        and (
+                            deadline is None
+                            or delay + 0.05 < deadline - time.monotonic()
+                        )
                     )
                     if (
                         isinstance(error_detail, JevError)
@@ -622,8 +762,17 @@ class JevProvider(Component):
                             not retry and not error_detail.detail.retry_exhausted
                         )
                     latency = time.monotonic() - attempt_started
+                    timing["attempt"] = latency
+                    if processing_started is not None:
+                        timing["processing"] = time.monotonic() - processing_started
+                    if isinstance(error_detail, JevError):
+                        error_detail.detail.timing_seconds = timing
+                    spans.append(timing)
                     detail = failure_details(error_detail)
                     if self.accounting:
+                        hook = getattr(self.accounting, "timing", None)
+                        if hook:
+                            hook(call_id, timing)
                         if known_usage:
                             self.accounting.success(call_id, known_usage, latency)
                         self.accounting.failure(call_id, error_detail, latency)
@@ -650,15 +799,28 @@ class JevProvider(Component):
                         raise
                     if not retry:
                         raise error_detail from None
-                    await asyncio.sleep(delay)
+                    backoff_started = time.monotonic()
+                    try:
+                        await asyncio.sleep(delay)
+                    finally:
+                        timing["backoff"] = time.monotonic() - backoff_started
+                        hook = getattr(self.accounting, "timing", None)
+                        if hook:
+                            hook(call_id, timing)
                 else:
                     latency = time.monotonic() - attempt_started
+                    timing["processing"] = time.monotonic() - processing_started
+                    timing["attempt"] = latency
+                    spans.append(timing)
                     self.rate_limiter.reconcile(
                         admission,
                         result.score_metadata["usage"]["input_tokens"]
                         + result.score_metadata["usage"]["output_tokens"],
                     )
                     if self.accounting:
+                        hook = getattr(self.accounting, "timing", None)
+                        if hook:
+                            hook(call_id, timing)
                         self.accounting.success(
                             call_id, result.score_metadata["usage"], latency
                         )
@@ -684,6 +846,7 @@ class JevProvider(Component):
                         attempt_count=attempt,
                         rate_wait_seconds=admission.waited,
                         retry_failures=failures,
+                        timing_spans=spans,
                     )
                     alternatives = {
                         label: DecisionResult(

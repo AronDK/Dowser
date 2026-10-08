@@ -31,6 +31,10 @@ class FailureDetail(Boundary):
         "decision",
         "accounting",
     ]
+    timeout_kind: (
+        Literal["attempt", "aggregate", "incident", "user_cancellation"] | None
+    ) = None
+    timing_seconds: dict[str, float | None] = Field(default_factory=dict)
     retryable: bool = False
     http_status: int | None = Field(default=None, ge=100, le=599)
     cause_type: str | None = Field(

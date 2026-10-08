@@ -42,6 +42,7 @@ class Ledger:
                 "attempt": "INTEGER NOT NULL DEFAULT 1",
                 "request_id": "TEXT",
                 "failure_details": "TEXT",
+                "timing_seconds": "TEXT",
             }.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE calls ADD COLUMN {name} {definition}")
@@ -188,6 +189,23 @@ class Ledger:
                     call_id,
                 ),
             )
+
+    def timing(self, call_id, spans):
+        with self.connect() as db:
+            db.execute(
+                "UPDATE calls SET timing_seconds=? WHERE id=?",
+                (json.dumps(spans), call_id),
+            )
+
+    def timings(self, trial):
+        with self.connect() as db:
+            return [
+                json.loads(row[0])
+                for row in db.execute(
+                    "SELECT timing_seconds FROM calls WHERE trial=? AND timing_seconds IS NOT NULL ORDER BY id",
+                    (trial,),
+                )
+            ]
 
     def stats(self, trial=None):
         with self.connect() as db:
