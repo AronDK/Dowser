@@ -85,3 +85,32 @@ alert text and source references. Informational shortlist flags remain explicit.
 All forty real-snapshot initial contexts now fit (maximum alert view: 7,563 bytes).
 The 17 progress tests, 15 memory tests and four assessment tests passed after the
 correction. The failed preflight campaign remains preserved separately.
+
+## Authorized pilot result
+
+The user subsequently authorized the ten-case pilot. Campaign
+`.local/itbench-aa-prepared-v2/jev-progress-pilot-20261008T144711Z/` completed all ten
+cases with assessments and model-selected escalation disabled.
+
+| Metric | Preserved baseline | New pilot |
+| --- | ---: | ---: |
+| Exact root-set accuracy | 2/10 | 0/10 |
+| Submitted diagnoses | 7 | 7 |
+| Incident runtime | 85.3 min | 48.4 min |
+| HTTP attempts | 2,924 | 2,201 |
+| New accounted spending | $1.637824 | $1.285751 |
+| Wait decisions | 1 | 991 |
+| Duplicate model contexts, excluding transient metadata | 1 | 988 |
+
+Accuracy regressed despite shorter runtime. Cases 8, 16 and 19 exhausted navigation
+and repeatedly waited until required evidence became stale. Seven other cases
+submitted incorrect diagnoses. No model-selected escalation occurred. Focus
+concentrated in infrastructure, with only one focus action in `otel-demo`; review
+public-alert relevance and navigation identity before another paid pilot.
+
+All 32 failed attempts were connection timeouts and retried. Their unknown
+reservations remain accounted. Cumulative spending is $7.186435, including the
+preserved predecessor spending. All 929 preserved campaign files passed unchanged
+hash verification. The full evaluation was not started and no paid trial replayed.
+Detailed metrics, per-case results and observed failure patterns are in the
+campaign's `comparison.json`, `comparison.md` and `findings.json`.
