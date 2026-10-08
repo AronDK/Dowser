@@ -338,9 +338,15 @@ class Plugin(Component):
                 "logs",
                 "traces",
                 "metrics",
+                "related_configuration",
+                "related_events",
             ]:
                 if self.index.refs(
-                    entity, "configuration" if kind == "history" else kind
+                    entity,
+                    "configuration"
+                    if kind == "history"
+                    else kind.removeprefix("related_"),
+                    related=kind.startswith("related_"),
                 ):
                     add(
                         "inspect",
@@ -362,12 +368,30 @@ class Plugin(Component):
                     for e in link[:2]
                     if e != entity
                 }
-                for other in sorted(related):
+                for other in sorted(related)[:2]:
                     add(
                         "focus",
                         "Follow observed relationship to " + other,
                         entity=other,
                     )
+            current = next((r for r in w["evidence"]["records"] if "id" in r), None)
+            if current and not w["kind"].startswith("raw_"):
+                source_kind = w["kind"].removeprefix("related_")
+                source_kind = (
+                    "configuration" if source_kind == "history" else source_kind
+                )
+                refs = self.index.refs(
+                    entity, source_kind, related=w["kind"].startswith("related_")
+                )
+                add(
+                    "inspect",
+                    "Inspect full sanitized raw record with provenance",
+                    entity=entity,
+                    kind="raw_"
+                    + ("related_" if w["kind"].startswith("related_") else "")
+                    + source_kind,
+                    offset=refs.index(current["id"]),
+                )
             if w["next"] is not None:
                 add(
                     "next",

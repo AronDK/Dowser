@@ -254,9 +254,10 @@ def prepare(dataset, root):
             coverage = {
                 relative for _, relative, _ in snapshot_files(dataset / "sre" / name)
             }
-            if set(meta["files"]) != coverage:
-                meta = create_index(dataset / "sre" / name, output, scenario)
-                output.chmod(0o444)
+            if set(meta["files"]) != coverage or meta["version"] != 2:
+                raise ValueError(
+                    "existing index has old coverage or schema; prepare in a separate root"
+                )
         else:
             meta = create_index(dataset / "sre" / name, output, scenario)
             output.chmod(0o444)

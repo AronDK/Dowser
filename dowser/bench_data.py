@@ -15,7 +15,7 @@ REVISION = "76df38a82288f75ba9e41dc8c515033332497473"
 REPO = "ArtificialAnalysis/ITBench-AA"
 TITLE = "ITBench-AA public subset — Dowser/Jev adapted evaluation"
 PILOT = [8, 2, 19, 17, 16, 9, 7, 6, 31, 102]
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 PAGE_BYTES = 4096
 STATE_BYTES = 8192
 CLUSTER_KINDS = {
@@ -210,6 +210,109 @@ def row_identities(row):
     return result
 
 
+def primary_objects(row):
+    """Only actual objects, never identities mentioned inside their spec/status."""
+    value = decoded(row)
+    if isinstance(value, dict):
+        if object_id(value):
+            yield value
+        else:
+            for child in value.values():
+                yield from primary_objects(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from primary_objects(child)
+
+
+def evidence_owners(row, kind):
+    if kind == "configuration":
+        return {object_id(obj) for obj in primary_objects(row)}
+    if kind == "events":
+        targets = set()
+        for obj in walk(row):
+            for field in ("regarding", "involvedObject"):
+                target = decoded(obj.get(field))
+                if isinstance(target, dict):
+                    key = identity(
+                        target.get("namespace"), target.get("kind"), target.get("name")
+                    )
+                    if key:
+                        targets.add(key)
+        return targets
+    return row_identities(row)
+
+
+def compact_object(obj):
+    # Resource versions, timestamps and field-manager churn are provenance, not findings.
+    result = {
+        "kind": obj["kind"],
+        "metadata": {
+            k: v
+            for k, v in obj.get("metadata", {}).items()
+            if k in {"name", "namespace", "labels", "annotations", "ownerReferences"}
+        },
+    }
+    for key in ("spec", "data", "binaryData", "status"):
+        if key in obj:
+            result[key] = obj[key]
+    return strip_administration(result)
+
+
+def strip_administration(value):
+    if isinstance(value, dict):
+        return {
+            k: strip_administration(v)
+            for k, v in value.items()
+            if k
+            not in {
+                "managedFields",
+                "resourceVersion",
+                "creationTimestamp",
+                "lastTransitionTime",
+                "lastProbeTime",
+            }
+        }
+    if isinstance(value, list):
+        return [strip_administration(v) for v in value]
+    return value
+
+
+def compact_evidence(data, entity, kind):
+    if kind in {"configuration", "history"}:
+        return {
+            "objects": [
+                compact_object(obj)
+                for obj in primary_objects(data)
+                if object_id(obj) == entity
+            ]
+        }
+    if kind == "events":
+        return {
+            "events": [
+                {
+                    k: v
+                    for k, v in obj.items()
+                    if k
+                    in {
+                        "reason",
+                        "message",
+                        "note",
+                        "type",
+                        "regarding",
+                        "involvedObject",
+                        "count",
+                        "series",
+                        "action",
+                        "reportingController",
+                    }
+                }
+                for obj in walk(data)
+                if "regarding" in obj or "involvedObject" in obj
+            ]
+        }
+    return strip_administration(data)
+
+
 def snapshot_files(root):
     files = []
     for path in sorted(root.rglob("*")):
@@ -258,6 +361,8 @@ def create_index(root, output, scenario):
     """One record at a time; originals never modified. Labels are not read here."""
     root, output = Path(root), Path(output)
     files = snapshot_files(root)
+    if output.exists():
+        raise ValueError("index already exists; prepare in a separate root")
     if not any(kind == "configuration" for _, _, kind in files):
         raise ValueError("snapshot lacks object history")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -270,6 +375,7 @@ def create_index(root, output, scenario):
         CREATE TABLE entities(name TEXT PRIMARY KEY);
         CREATE TABLE records(id INTEGER PRIMARY KEY,kind TEXT,file TEXT,record INTEGER,timestamp TEXT,payload TEXT);
         CREATE TABLE record_entities(record_id INTEGER,entity TEXT,PRIMARY KEY(record_id,entity));
+        CREATE TABLE record_owners(record_id INTEGER,entity TEXT,PRIMARY KEY(record_id,entity));
         CREATE TABLE relationships(source TEXT,target TEXT,relation TEXT,PRIMARY KEY(source,target,relation));
     """)
     hashes, counts = {}, {}
@@ -290,7 +396,13 @@ def create_index(root, output, scenario):
                     "INSERT INTO records(kind,file,record,timestamp,payload) VALUES(?,?,?,?,?)",
                     (kind, relative, record, timestamp, dumps(row)),
                 )
-                ids = row_identities(raw)
+                owners = evidence_owners(raw, kind)
+                ids = row_identities(raw) | owners
+                for key in owners:
+                    db.execute(
+                        "INSERT OR IGNORE INTO record_owners VALUES(?,?)",
+                        (cursor.lastrowid, key),
+                    )
                 for key in ids:
                     db.execute("INSERT OR IGNORE INTO entities VALUES(?)", (key,))
                     db.execute(
@@ -316,6 +428,32 @@ def create_index(root, output, scenario):
                                     "INSERT OR IGNORE INTO relationships VALUES(?,?,?)",
                                     (child, parent, "owner"),
                                 )
+                    # Observed pod placement and configuration references expose dependencies.
+                    if child:
+                        spec = obj.get("spec", {})
+                        node = identity(None, "Node", spec.get("nodeName"))
+                        dependencies = [(node, "placement")] if node else []
+                        for part in walk(spec):
+                            for field, dep_kind in (
+                                ("configMapRef", "ConfigMap"),
+                                ("configMapKeyRef", "ConfigMap"),
+                                ("configMap", "ConfigMap"),
+                            ):
+                                ref = part.get(field, {})
+                                if isinstance(ref, dict):
+                                    target = identity(
+                                        meta.get("namespace"), dep_kind, ref.get("name")
+                                    )
+                                    if target:
+                                        dependencies.append((target, "configuration"))
+                        for target, relation in dependencies:
+                            db.execute(
+                                "INSERT OR IGNORE INTO entities VALUES(?)", (target,)
+                            )
+                            db.execute(
+                                "INSERT OR IGNORE INTO relationships VALUES(?,?,?)",
+                                (child, target, relation),
+                            )
                 counts[kind] += 1
                 if counts[kind] % 5000 == 0:
                     db.commit()
@@ -343,7 +481,7 @@ def create_index(root, output, scenario):
                         (pod, service, "selector"),
                     )
         db.executescript(
-            "CREATE INDEX records_kind ON records(kind,id); CREATE INDEX evidence_entity ON record_entities(entity,record_id);"
+            "CREATE INDEX records_kind ON records(kind,id); CREATE INDEX evidence_entity ON record_entities(entity,record_id); CREATE INDEX owner_entity ON record_owners(entity,record_id);"
         )
         metadata = {
             "version": INDEX_VERSION,
@@ -369,7 +507,10 @@ class EvidenceIndex:
             self.meta = json.loads(
                 db.execute("SELECT value FROM meta WHERE key='manifest'").fetchone()[0]
             )
-        if self.meta["scenario"] != scenario or self.meta["version"] != INDEX_VERSION:
+        if self.meta["scenario"] != scenario or self.meta["version"] not in {
+            1,
+            INDEX_VERSION,
+        }:
             raise ValueError("index outside scenario scope or version")
 
     @contextmanager
@@ -393,18 +534,32 @@ class EvidenceIndex:
             )
 
     @lru_cache(maxsize=256)
-    def refs(self, entity, kind):
+    def refs(self, entity, kind, related=False):
         with self.connect() as db:
+            table = (
+                "record_entities"
+                if related or self.meta["version"] == 1
+                else "record_owners"
+            )
             if entity:
                 rows = db.execute(
-                    "SELECT r.id FROM records r JOIN record_entities e ON r.id=e.record_id WHERE e.entity=? AND r.kind=? ORDER BY r.id DESC",
+                    f"SELECT r.id FROM records r JOIN {table} e ON r.id=e.record_id WHERE e.entity=? AND r.kind=? ORDER BY r.id DESC",
                     (entity, kind),
                 )
             else:
                 rows = db.execute(
                     "SELECT id FROM records WHERE kind=? ORDER BY id DESC", (kind,)
                 )
-            return [r[0] for r in rows]
+            refs = [r[0] for r in rows]
+        if entity and self.meta["version"] == 1 and not related:
+            refs = [
+                rid
+                for rid in refs
+                if entity in evidence_owners(self.record(rid)["data"], kind)
+            ]
+        if related and entity:
+            refs = [rid for rid in refs if not self.owns(entity, rid)]
+        return refs
 
     def record(self, record_id):
         with self.connect() as db:
@@ -421,47 +576,76 @@ class EvidenceIndex:
             "data": json.loads(row[4]),
         }
 
+    @lru_cache(maxsize=4096)
     def owns(self, entity, record_id):
+        if self.meta["version"] == 1:
+            record = self.record(record_id)
+            return entity in evidence_owners(record["data"], record["kind"])
         with self.connect() as db:
             return (
                 db.execute(
-                    "SELECT 1 FROM record_entities WHERE entity=? AND record_id=?",
+                    "SELECT 1 FROM record_owners WHERE entity=? AND record_id=?",
                     (entity, record_id),
                 ).fetchone()
                 is not None
             )
 
+    @lru_cache(maxsize=512)
+    def revisions(self, entity):
+        groups = []
+        previous = None
+        for rid in self.refs(entity, "configuration"):
+            record = self.record(rid)
+            projection = compact_evidence(record["data"], entity, "configuration")
+            semantic = fingerprint(projection)
+            if semantic == previous:
+                groups[-1]["count"] += 1
+                groups[-1]["oldest_ref"] = record["ref"]
+            else:
+                groups.append(
+                    {
+                        "id": rid,
+                        "count": 1,
+                        "oldest_ref": record["ref"],
+                        "semantic": semantic,
+                    }
+                )
+            previous = semantic
+        return groups
+
     def page(self, entity, kind, offset=0, segment=0):
-        refs = self.refs(entity, "configuration" if kind == "history" else kind)
+        raw_view = kind == "raw" or kind.startswith("raw_")
+        view_kind = kind.removeprefix("raw_")
+        related = view_kind.startswith("related_")
+        source_kind = view_kind.removeprefix("related_")
+        source_kind = (
+            "configuration" if source_kind in {"history", "raw"} else source_kind
+        )
+        groups = (
+            self.revisions(entity) if kind in {"configuration", "history"} else None
+        )
+        refs = (
+            [g["id"] for g in groups]
+            if groups is not None
+            else self.refs(entity, source_kind, related)
+        )
         if offset >= len(refs):
-            return {"records": [], "next": None}
+            return {
+                "records": [],
+                "next": None,
+                "missing_evidence": True,
+                "entity": entity,
+            }
         rid = refs[offset]
         full = self.record(rid)
-        if kind == "history":
-            full["data"] = {
-                "query_template": "object revision identity and configuration",
-                "objects": [
-                    {
-                        "kind": obj["kind"],
-                        "metadata": {
-                            k: v
-                            for k, v in obj.get("metadata", {}).items()
-                            if k
-                            in {
-                                "name",
-                                "namespace",
-                                "resourceVersion",
-                                "generation",
-                                "creationTimestamp",
-                                "ownerReferences",
-                            }
-                        },
-                        **{k: obj[k] for k in ("spec", "data", "status") if k in obj},
-                    }
-                    for obj in walk(full["data"])
-                    if object_id(obj) == entity
-                ],
-            }
+        semantic = fingerprint(compact_evidence(full["data"], entity, source_kind))
+        if not raw_view:
+            # Related records are explicitly labelled; their primary owners retain authority.
+            full["data"] = (
+                compact_evidence(full["data"], entity, source_kind)
+                if not related
+                else strip_administration(full["data"])
+            )
         # Byte-bounded segments keep even huge object revisions accessible.
         raw = dumps(full["data"]).encode()
         chunks, start = [], 0
@@ -488,10 +672,17 @@ class EvidenceIndex:
                     "segment": segment,
                     "segments": len(chunks),
                     "content": chunks[segment],
+                    "ownership": "related" if related else "primary",
+                    "semantic_fingerprint": semantic,
+                    "collapsed_revisions": groups[offset]["count"] if groups else 1,
+                    "oldest_ref": groups[offset]["oldest_ref"]
+                    if groups
+                    else full["ref"],
                 }
             ],
             "next": nxt,
             "total_records": len(refs),
+            "source_records": sum(g["count"] for g in groups) if groups else len(refs),
         }
         if len(dumps(page).encode()) > PAGE_BYTES:
             raise ContextOverflowError("context overflow: evidence page")
@@ -507,6 +698,9 @@ class EvidenceIndex:
                 "alert": labels.get("alertname", row.get("name", "alert")),
                 "namespace": labels.get("namespace", ""),
                 "service": labels.get("service_name", labels.get("service", "")),
+                "causal_shortlist": labels.get("alertname")
+                not in {"Watchdog", "InfoInhibitor"},
+                "entities": sorted(row_identities(row)),
                 "summary": annotations.get(
                     "summary", annotations.get("description", "")
                 ),

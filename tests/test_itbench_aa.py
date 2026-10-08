@@ -201,7 +201,7 @@ class DataTests(unittest.TestCase):
         offset, segment = 0, 0
         text = []
         while True:
-            page = self.index.page(ENTITY, "configuration", offset, segment)
+            page = self.index.page(ENTITY, "raw_configuration", offset, segment)
             self.assertLessEqual(len(dumps(page).encode()), 4096)
             text.append(page["records"][0]["content"])
             if page["next"] is None or page["next"][0] != 0:
@@ -920,11 +920,9 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
         resilient_summary = report(resilient)
         self.assertEqual(resilient_summary["full_trials"], 120)
         self.assertEqual(resilient_summary["pilot_trials"], 10)
-        self.assertAlmostEqual(resilient_summary["mean_score"], 119 / 120)
-        self.assertEqual(
-            resilient_summary["failure_categories"], {"provider": 1, "completed": 119}
-        )
-        self.assertEqual(resilient_summary["ledger"]["calls"], 517)
+        self.assertEqual(resilient_summary["mean_score"], 1)
+        self.assertEqual(resilient_summary["failure_categories"], {"completed": 120})
+        self.assertEqual(resilient_summary["ledger"]["calls"], 521)
         self.assertEqual(resilient_summary["ledger"]["unknown_calls"], 1)
         self.assertTrue(resilient_summary["complete"])
         prepared["fingerprint"] = "different"

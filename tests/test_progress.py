@@ -2,7 +2,9 @@
 
 import asyncio
 import io
+import json
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -171,3 +173,134 @@ class TimeoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(limiter.window[0].tokens, 66048)
         limiter.reconcile(admission, 11)
         self.assertEqual(limiter.window[0].tokens, 11)
+
+
+class EvidenceTests(unittest.TestCase):
+    def setUp(self):
+        import csv
+
+        from dowser.bench_data import EvidenceIndex, create_index
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.node = "cluster/Node/worker"
+        self.pod = "demo/Pod/shipping"
+        objects = [
+            {
+                "kind": "Node",
+                "metadata": {
+                    "name": "worker",
+                    "resourceVersion": "1",
+                    "managedFields": [{"noise": "x" * 10000}],
+                },
+                "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+            },
+            {
+                "kind": "Pod",
+                "metadata": {"name": "shipping", "namespace": "demo"},
+                "spec": {
+                    "nodeName": "worker",
+                    "containers": [
+                        {
+                            "image": "shipping:1",
+                            "env": [{"name": "QUOTE_ADDR", "value": "quote:0000"}],
+                            "resources": {"limits": {"cpu": "1"}},
+                        }
+                    ],
+                },
+            },
+            {
+                "kind": "Node",
+                "metadata": {
+                    "name": "worker",
+                    "resourceVersion": "2",
+                    "managedFields": [{"manager": "new"}],
+                },
+                "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+            },
+            {
+                "kind": "ConfigMap",
+                "metadata": {"name": "flagd", "namespace": "demo"},
+                "data": {"flags.json": '{"paymentFailure":true}'},
+            },
+        ]
+        with (root / "k8s_objects_raw.tsv").open("w", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["Timestamp", "Body", "ResourceAttributes"],
+                delimiter="\t",
+            )
+            writer.writeheader()
+            for i, obj in enumerate(objects):
+                writer.writerow(
+                    {
+                        "Timestamp": str(i),
+                        "Body": json.dumps(obj),
+                        "ResourceAttributes": json.dumps({"k8s.node.name": "worker"}),
+                    }
+                )
+        with (root / "k8s_events_raw.tsv").open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["Body"], delimiter="\t")
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "Body": json.dumps(
+                        {
+                            "kind": "Event",
+                            "metadata": {"name": "failed", "namespace": "demo"},
+                            "regarding": {
+                                "kind": "Pod",
+                                "namespace": "demo",
+                                "name": "shipping",
+                            },
+                            "reason": "Failed",
+                            "note": "connection refused",
+                        }
+                    )
+                }
+            )
+        path = root / "index.sqlite3"
+        create_index(root, path, 1)
+        self.index = EvidenceIndex(path, 1)
+
+    def test_owners_and_related_records_are_separate(self):
+        self.assertEqual(len(self.index.refs(self.node, "configuration")), 2)
+        pod_record = self.index.refs(self.pod, "configuration")[0]
+        self.assertFalse(self.index.owns(self.node, pod_record))
+        self.assertIn(
+            pod_record, self.index.refs(self.node, "configuration", related=True)
+        )
+        related = self.index.page(self.node, "related_configuration")
+        self.assertEqual(related["records"][0]["ownership"], "related")
+
+    def test_projection_collapses_churn_and_retains_config_and_events(self):
+        history = self.index.page(self.node, "history")
+        self.assertEqual(history["records"][0]["collapsed_revisions"], 2)
+        self.assertEqual(history["source_records"], 2)
+        self.assertIsNone(history["next"])
+        self.assertNotIn("managedFields", history["records"][0]["content"])
+        self.assertIn('"Ready"', history["records"][0]["content"])
+        self.assertIn(
+            "quote:0000",
+            self.index.page(self.pod, "configuration")["records"][0]["content"],
+        )
+        cfg = self.index.page("demo/ConfigMap/flagd", "configuration")
+        self.assertIn('"paymentFailure":true', cfg["records"][0]["content"])
+        event = self.index.page(self.pod, "events")
+        self.assertIn("connection refused", event["records"][0]["content"])
+        self.assertIn('"regarding"', event["records"][0]["content"])
+        self.assertTrue(self.index.owns(self.pod, event["records"][0]["id"]))
+        raw = self.index.page(self.node, "raw_configuration", offset=1)
+        self.assertIn("managedFields", raw["records"][0]["content"])
+        self.assertTrue(
+            self.index.page("demo/Pod/missing", "history")["missing_evidence"]
+        )
+
+    def test_existing_indexes_are_never_overwritten(self):
+        from dowser.bench_data import create_index
+
+        before = self.index.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "separate root"):
+            create_index(self.index.path.parent, self.index.path, 1)
+        self.assertEqual(before, self.index.path.read_bytes())
