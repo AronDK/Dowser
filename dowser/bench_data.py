@@ -357,6 +357,81 @@ def json_rows(path):
     yield from enumerate(data, 1)
 
 
+def object_dependencies(obj):
+    child = object_id(obj)
+    if not child:
+        return []
+    meta, spec = obj.get("metadata", {}), obj.get("spec", {})
+    links = []
+    node = identity(None, "Node", spec.get("nodeName"))
+    if node:
+        links.append((child, node, "placement"))
+    for part in walk(spec):
+        for field in ("configMapRef", "configMapKeyRef", "configMap"):
+            ref = part.get(field, {})
+            if isinstance(ref, dict):
+                target = identity(meta.get("namespace"), "ConfigMap", ref.get("name"))
+                if target:
+                    links.append((child, target, "configuration"))
+    return links
+
+
+def upgrade_index(source, output, scenario, expected_files):
+    """Reuse immutable sanitized rows; rebuild ownership in a distinct v2 file."""
+    import shutil
+
+    index = EvidenceIndex(source, scenario)
+    if index.meta["files"] != expected_files:
+        raise ValueError("source index differs from pinned evidence files")
+    output = Path(output)
+    if output.exists() or output.absolute() == Path(source).absolute():
+        raise ValueError("index already exists; prepare in a separate root")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp = confined(output.parent, output.name + ".building", must_exist=False)
+    # Source is opened read-only; a standalone copy never shares mutable pages.
+    shutil.copyfile(index.path, temp)
+    db = sqlite3.connect(temp)
+    try:
+        db.executescript(
+            "DROP TABLE IF EXISTS record_owners; CREATE TABLE record_owners(record_id INTEGER,entity TEXT,PRIMARY KEY(record_id,entity));"
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO record_owners SELECT e.record_id,e.entity FROM record_entities e JOIN records r ON r.id=e.record_id WHERE r.kind NOT IN ('configuration','events')"
+        )
+        for rid, kind, payload in db.execute(
+            "SELECT id,kind,payload FROM records WHERE kind IN ('configuration','events')"
+        ):
+            row = json.loads(payload)
+            for owner in evidence_owners(row, kind):
+                db.execute("INSERT OR IGNORE INTO entities VALUES(?)", (owner,))
+                db.execute(
+                    "INSERT OR IGNORE INTO record_owners VALUES(?,?)", (rid, owner)
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO record_entities VALUES(?,?)", (rid, owner)
+                )
+            if kind == "configuration":
+                for obj in primary_objects(row):
+                    for child, target, relation in object_dependencies(obj):
+                        db.execute(
+                            "INSERT OR IGNORE INTO entities VALUES(?)", (target,)
+                        )
+                        db.execute(
+                            "INSERT OR IGNORE INTO relationships VALUES(?,?,?)",
+                            (child, target, relation),
+                        )
+        db.execute("CREATE INDEX owner_entity ON record_owners(entity,record_id)")
+        meta = {k: v for k, v in index.meta.items() if k != "fingerprint"}
+        meta["version"] = INDEX_VERSION
+        meta["fingerprint"] = fingerprint(meta)
+        db.execute("UPDATE meta SET value=? WHERE key='manifest'", (dumps(meta),))
+        db.commit()
+    finally:
+        db.close()
+    temp.replace(output)
+    return meta
+
+
 def create_index(root, output, scenario):
     """One record at a time; originals never modified. Labels are not read here."""
     root, output = Path(root), Path(output)
@@ -428,32 +503,14 @@ def create_index(root, output, scenario):
                                     "INSERT OR IGNORE INTO relationships VALUES(?,?,?)",
                                     (child, parent, "owner"),
                                 )
-                    # Observed pod placement and configuration references expose dependencies.
-                    if child:
-                        spec = obj.get("spec", {})
-                        node = identity(None, "Node", spec.get("nodeName"))
-                        dependencies = [(node, "placement")] if node else []
-                        for part in walk(spec):
-                            for field, dep_kind in (
-                                ("configMapRef", "ConfigMap"),
-                                ("configMapKeyRef", "ConfigMap"),
-                                ("configMap", "ConfigMap"),
-                            ):
-                                ref = part.get(field, {})
-                                if isinstance(ref, dict):
-                                    target = identity(
-                                        meta.get("namespace"), dep_kind, ref.get("name")
-                                    )
-                                    if target:
-                                        dependencies.append((target, "configuration"))
-                        for target, relation in dependencies:
-                            db.execute(
-                                "INSERT OR IGNORE INTO entities VALUES(?)", (target,)
-                            )
-                            db.execute(
-                                "INSERT OR IGNORE INTO relationships VALUES(?,?,?)",
-                                (child, target, relation),
-                            )
+                    for child, target, relation in object_dependencies(obj):
+                        db.execute(
+                            "INSERT OR IGNORE INTO entities VALUES(?)", (target,)
+                        )
+                        db.execute(
+                            "INSERT OR IGNORE INTO relationships VALUES(?,?,?)",
+                            (child, target, relation),
+                        )
                 counts[kind] += 1
                 if counts[kind] % 5000 == 0:
                     db.commit()
@@ -674,6 +731,14 @@ class EvidenceIndex:
                     "content": chunks[segment],
                     "ownership": "related" if related else "primary",
                     "semantic_fingerprint": semantic,
+                    "empty_view": source_kind == "configuration"
+                    and not any(
+                        any(
+                            obj.get(k) for k in ("spec", "data", "binaryData", "status")
+                        )
+                        for obj in primary_objects(self.record(rid)["data"])
+                        if object_id(obj) == entity
+                    ),
                     "collapsed_revisions": groups[offset]["count"] if groups else 1,
                     "oldest_ref": groups[offset]["oldest_ref"]
                     if groups

@@ -103,18 +103,33 @@ def bounded_state(value):
 
 def order_entities(index, seed):
     entities = index.entities()
-    # Prioritize application/chaos entities before system objects using only
-    # observed namespaces. Every entity remains reachable through pagination.
-    primary = [
+    # Public alerts seed the browser, then observed owner/dependency neighbours.
+    causal_alerts = [
+        a for a in index.alert_summaries() if a.get("causal_shortlist", True)
+    ]
+    named = {e for a in causal_alerts for e in a.get("entities", []) if e in entities}
+    relations = index.relationships()
+    neighbourhood = set(named)
+    for _ in range(2):
+        neighbourhood.update(
+            e for link in relations if set(link[:2]) & neighbourhood for e in link[:2]
+        )
+    primary = [e for e in entities if e in named]
+    neighbours = [e for e in entities if e in neighbourhood - named]
+    application = [
         e
         for e in entities
-        if e.split("/")[0] in {"otel-demo", "chaos-mesh"} and e.split("/")[1] != "Event"
+        if e not in neighbourhood
+        and e.split("/")[0] in {"otel-demo", "chaos-mesh"}
+        and e.split("/")[1] != "Event"
     ]
-    remainder = [e for e in entities if e not in set(primary)]
+    remainder = [
+        e for e in entities if e not in neighbourhood and e not in set(application)
+    ]
     rng = random.Random(seed)
-    rng.shuffle(primary)
-    rng.shuffle(remainder)
-    return primary + remainder
+    for group in (primary, neighbours, application, remainder):
+        rng.shuffle(group)
+    return primary + neighbours + application + remainder
 
 
 class Normalizer(Component):
@@ -228,6 +243,49 @@ class Plugin(Component):
         self.store = context.services.get("event_store")
         self.read_cache = {}
         self.cache_loaded = False
+        self.eligible_refs = {}
+        self.findings = {}
+        self.seen_observations = set()
+        self.neighbours = {}
+        for source, target, relation in self.index.relationships():
+            self.neighbours.setdefault(source, set()).add(target)
+            self.neighbours.setdefault(target, set()).add(source)
+
+    def admit_page(self, entity, page):
+        for record in page.get("records", []):
+            rid = record.get("id")
+            if (
+                rid is not None
+                and not record.get("empty_view", False)
+                and self.index.owns(entity, rid)
+            ):
+                self.eligible_refs.setdefault(entity, set()).add(rid)
+                if record.get("semantic_fingerprint") and not record.get(
+                    "empty_view", False
+                ):
+                    self.findings.setdefault(entity, set()).add(
+                        record["semantic_fingerprint"]
+                    )
+            elif record.get("relationships"):
+                self.findings.setdefault(entity, set()).add(
+                    digest(record["relationships"])
+                )
+
+    def admit_state(self, state):
+        # Only parsed observations supplied by the incident loop are eligible.
+        for obs in state.observations:
+            if obs.id in self.seen_observations or obs.kind != "investigation":
+                continue
+            self.seen_observations.add(obs.id)
+            if self.store is not None and not obs.evidence_refs:
+                continue
+            value = obs.payload
+            if value.get("focus"):
+                self.admit_page(value["focus"], value["evidence"])
+
+    def knowledge_version(self, entity):
+        relevant = {entity, *self.neighbours.get(entity, ())}
+        return digest({e: sorted(self.findings.get(e, ())) for e in sorted(relevant)})
 
     def read_key(self, args):
         return digest(
@@ -249,11 +307,21 @@ class Plugin(Component):
             )
         else:
             key = digest([candidate.tool, candidate.resources, args])
-        view = {k: v for k, v in working(state).items() if k != "revision"}
+        self.admit_state(state)
+        w = working(state)
+        entity = args.get("entity") or w.get("focus", "")
+        if args["operation"] == "browse":
+            # Browser pages depend only on the targets they actually present.
+            targets = self.entities[args["offset"] : args["offset"] + 12]
+            decision_state = digest([self.knowledge_version(e) for e in targets])
+        elif args["operation"] in {"nominate", "remove", "submit"}:
+            decision_state = digest([self.knowledge_version(entity), w["nominations"]])
+        else:
+            decision_state = self.knowledge_version(entity)
         return ActionIdentity(
             key=key,
             evidence_version=self.index.meta["fingerprint"],
-            decision_state=digest([view, sorted(self.read_cache)]),
+            decision_state=decision_state,
         )
 
     def scope(self, state):
@@ -275,6 +343,7 @@ class Plugin(Component):
 
     def choices(self, state):
         w = self.scope(state)
+        self.admit_state(state)
         options = []
 
         def add(operation, description, **kwargs):
@@ -401,16 +470,12 @@ class Plugin(Component):
                     offset=w["next"][0],
                     segment=w["next"][1],
                 )
-            owned = [
-                r["id"]
-                for r in w["evidence"]["records"]
-                if "id" in r and self.index.owns(entity, r["id"])
-            ]
+            owned = sorted(self.eligible_refs.get(entity, ()))
             if owned:
                 for reason in REASONS:
                     add(
                         "nominate",
-                        f"Nominate {entity} as an independent root cause: {reason}; cite current evidence",
+                        f"Nominate {entity} as an independent root cause: {reason}; cite admitted inspected evidence",
                         entity=entity,
                         reason=reason,
                     )
@@ -436,9 +501,11 @@ class Plugin(Component):
             if cached:
                 for identity, result in (await cached(state.incident_id)).items():
                     if identity.endswith(":read") and "working" in result:
-                        self.read_cache[identity.removesuffix(":read")] = result[
-                            "working"
-                        ]["evidence"]
+                        value = result["working"]
+                        self.read_cache[identity.removesuffix(":read")] = value[
+                            "evidence"
+                        ]
+                        self.admit_page(value["focus"], value["evidence"])
             self.cache_loaded = True
         with self.lock:
             return self.choices(state)
@@ -488,6 +555,10 @@ class Plugin(Component):
             for rid in nomination["records"]:
                 if not self.index.owns(entity, rid):
                     raise ValueError("diagnosis evidence outside entity ownership")
+                if rid not in self.eligible_refs.get(entity, ()):
+                    raise ValueError(
+                        "diagnosis evidence was not admitted in this trial"
+                    )
                 record = self.index.record(rid)
                 evidence.append(
                     f"{record['kind']} at {record['timestamp']}: {record['ref']}; inspected snapshot record"
@@ -554,11 +625,9 @@ class Plugin(Component):
                     self.read_cache[self.read_key(a)] = copy.deepcopy(w["evidence"])
             elif op == "nominate":
                 prior = w["nominations"].get(a["entity"], {}).get("records", [])
-                owned = [
-                    r["id"]
-                    for r in w["evidence"]["records"]
-                    if "id" in r and self.index.owns(a["entity"], r["id"])
-                ]
+                owned = sorted(self.eligible_refs.get(a["entity"], ()))
+                if not owned:
+                    raise ValueError("nomination lacks admitted owned evidence")
                 w["nominations"][a["entity"]] = {
                     "reason": a["reason"],
                     "records": sorted(set(prior + owned)),
@@ -619,6 +688,20 @@ class Plugin(Component):
                     "segment": a["segment"],
                     "records": records,
                     "next": evidence["next"],
+                    "semantic_fingerprints": sorted(
+                        {
+                            r["semantic_fingerprint"]
+                            for r in evidence["records"]
+                            if r.get("semantic_fingerprint")
+                            and not r.get("empty_view", False)
+                        }
+                    ),
+                    "meaningful": any(
+                        r.get("semantic_fingerprint")
+                        and not r.get("empty_view", False)
+                        and r.get("ownership") == "primary"
+                        for r in evidence["records"]
+                    ),
                 },
             )
         ]

@@ -5,12 +5,13 @@ import time
 from itertools import count
 
 from .contracts import Component, factory
-from .core import EmptySettings, required_view
+from .core import required_view, runtime_view
 from .diagnostics import failure_details
 from .memory import action_identity
 from .models import (
     ActionCandidate,
     ActionIdentity,
+    Boundary,
     ContextCheck,
     DecisionBatch,
     DecisionCapabilities,
@@ -29,8 +30,15 @@ from .runtime import bounded_call
 from .store import reject_credentials
 
 
+class LoopSettings(Boundary):
+    bounded_runtime_view: bool = False
+    batch_diagnostics: bool = False
+    profile: bool = False
+
+
 class DefaultIncidentLoop(Component):
-    def __init__(self, context):
+    def __init__(self, context, settings=None):
+        self.settings = settings or LoopSettings()
         self.services = context.services
         self.limits = context.limits
         self.running = False
@@ -64,17 +72,53 @@ class DefaultIncidentLoop(Component):
         pending_recovery = None
         active = None
         evidence = set()
+        observed_ids = {o.id for o in state.observations}
+        timings = {}
+
+        def measure(name, duration):
+            entry = timings.setdefault(name, {"seconds": 0.0, "count": 0})
+            entry["seconds"] += duration
+            entry["count"] += 1
+
+        def copy_state(candidates=()):
+            started = time.perf_counter()
+            view = (
+                runtime_view(state, candidates)
+                if self.settings.bounded_runtime_view
+                else state
+            )
+            copied = view.model_copy(deep=True)
+            measure("state_copy", time.perf_counter() - started)
+            return copied
+
+        async def flush_timings():
+            if self.settings.profile and timings:
+                payload = {
+                    "spans": dict(timings),
+                    "live_observations": len(state.observations),
+                    "live_outcomes": len(state.attempts),
+                }
+                timings.clear()
+                await record("harness_timing", payload)
 
         def remaining():
             return deadline - time.monotonic()
 
         async def call(fn, *args, seconds=None):
-            return await bounded_call(
-                fn, *args, seconds=min(remaining(), seconds) if seconds else remaining()
-            )
+            started = time.perf_counter()
+            try:
+                return await bounded_call(
+                    fn,
+                    *args,
+                    seconds=min(remaining(), seconds) if seconds else remaining(),
+                )
+            finally:
+                measure(fn.__name__, time.perf_counter() - started)
 
         async def record(kind, payload, artifacts=None):
+            started = time.perf_counter()
             event = await store.append(state.incident_id, kind, payload, artifacts)
+            measure("sqlite_append", time.perf_counter() - started)
             evidence.add(f"{state.incident_id}:{event.sequence}")
             evidence.update((artifacts or {}).keys())
             return event
@@ -84,6 +128,7 @@ class DefaultIncidentLoop(Component):
             await record("state_transition", {"phase": value})
 
         async def terminate(reason, outcome=None, refs=None):
+            await flush_timings()
             outcome = outcome or ("recovery_unverified" if changes else "escalated")
             result = TerminalResult(
                 incident_id=state.incident_id,
@@ -131,7 +176,7 @@ class DefaultIncidentLoop(Component):
                     await call(
                         registry.validate,
                         candidate.model_copy(deep=True),
-                        state.model_copy(deep=True),
+                        copy_state(),
                     )
                 )
                 if result.allowed:
@@ -139,7 +184,7 @@ class DefaultIncidentLoop(Component):
                         await call(
                             policy.validate,
                             candidate.model_copy(deep=True),
-                            state.model_copy(deep=True),
+                            copy_state(),
                             budget,
                         )
                     )
@@ -213,13 +258,16 @@ class DefaultIncidentLoop(Component):
             for round_number in count(1):
                 if remaining() <= 0:
                     return await terminate("incident deadline exhausted")
+                await flush_timings()
+                if self.settings.bounded_runtime_view:
+                    state = runtime_view(state, pending_recovery or ())
                 await phase("observe")
                 candidates = (
                     pending_recovery
                     if pending_recovery is not None
                     else await call(
                         registry.candidates,
-                        state.model_copy(deep=True),
+                        copy_state(),
                     )
                 )
                 pending_recovery = None
@@ -250,7 +298,7 @@ class DefaultIncidentLoop(Component):
                 request = DecisionRequest.model_validate(
                     await call(
                         builder.build,
-                        state.model_copy(deep=True),
+                        copy_state(),
                         [c.model_copy(deep=True) for c in allowed],
                     )
                 )
@@ -305,17 +353,33 @@ class DefaultIncidentLoop(Component):
                             "context builder did not reduce request size"
                         )
                     request = trimmed
-                await record(
-                    "candidate_snapshot",
-                    {
-                        "request_id": request.id,
-                        "candidates": [c.model_dump(mode="json") for c in allowed],
-                    },
-                )
-                await record(
-                    "provider_request",
-                    {"round": round_number, "request": request.model_dump(mode="json")},
-                )
+                diagnostic_events = [
+                    (
+                        "candidate_snapshot",
+                        {
+                            "request_id": request.id,
+                            "candidates": [c.model_dump(mode="json") for c in allowed],
+                        },
+                    ),
+                    (
+                        "provider_request",
+                        {
+                            "round": round_number,
+                            "request": request.model_dump(mode="json"),
+                        },
+                    ),
+                ]
+                append_many = getattr(store, "append_many", None)
+                if self.settings.batch_diagnostics and append_many:
+                    started = time.perf_counter()
+                    events = await append_many(state.incident_id, diagnostic_events)
+                    measure("sqlite_batch", time.perf_counter() - started)
+                    evidence.update(
+                        f"{state.incident_id}:{event.sequence}" for event in events
+                    )
+                else:
+                    for kind, payload in diagnostic_events:
+                        await record(kind, payload)
                 try:
                     capability_fn = getattr(provider, "capabilities", None)
                     capability_value = (
@@ -450,7 +514,7 @@ class DefaultIncidentLoop(Component):
                             await call(
                                 executor.execute,
                                 selected.model_copy(deep=True),
-                                state.model_copy(deep=True),
+                                copy_state(),
                                 seconds=min(
                                     selected.timeout_seconds, self.limits.tool_seconds
                                 ),
@@ -538,7 +602,7 @@ class DefaultIncidentLoop(Component):
                                 raise ValueError(
                                     "parsed observation outside action scope"
                                 )
-                            existing = {o.id for o in state.observations}
+                            existing = observed_ids
                             if any(
                                 o.id in existing for o in parsed.observations
                             ) or len({o.id for o in parsed.observations}) != len(
@@ -587,6 +651,9 @@ class DefaultIncidentLoop(Component):
                         },
                     )
                     state.observations.extend(parsed.observations)
+                    observed_ids.update(o.id for o in parsed.observations)
+                    if self.settings.bounded_runtime_view:
+                        state = runtime_view(state, allowed)
                     evidence.update(o.id for o in parsed.observations)
                     for step_number, step in enumerate(result.steps, 1):
                         await record(
@@ -603,7 +670,7 @@ class DefaultIncidentLoop(Component):
                     verification = VerificationResult.model_validate(
                         await call(
                             verifier.verify,
-                            state.model_copy(deep=True),
+                            copy_state(),
                             selected.model_copy(deep=True),
                             result.model_copy(deep=True),
                         )
@@ -648,7 +715,7 @@ class DefaultIncidentLoop(Component):
                     ):
                         pending_recovery = await call(
                             registry.recover,
-                            state.model_copy(deep=True),
+                            copy_state(),
                             selected.model_copy(deep=True),
                             result.model_copy(deep=True),
                         )
@@ -664,6 +731,7 @@ class DefaultIncidentLoop(Component):
                     },
                 )
                 await phase("execution_failed")
+            await record("incident_expiry", {"timeout_kind": "incident"})
             return await terminate(
                 "incident deadline exhausted"
                 + ("; execution outcome unknown" if active else "")
@@ -694,7 +762,7 @@ class DefaultIncidentLoop(Component):
 @factory(
     subsystem="incident_loop",
     component_type=DefaultIncidentLoop,
-    settings_model=EmptySettings,
+    settings_model=LoopSettings,
     dependencies=(
         "event_store",
         "tool_registry",
@@ -706,4 +774,4 @@ class DefaultIncidentLoop(Component):
     ),
 )
 def incident_loop(settings, context):
-    return DefaultIncidentLoop(context)
+    return DefaultIncidentLoop(context, settings)

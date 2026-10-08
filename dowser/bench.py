@@ -27,6 +27,7 @@ from .bench_data import (
     file_hash,
     fingerprint,
     snapshot_files,
+    upgrade_index,
 )
 from .bench_ledger import PRICE_NANODOLLARS_PER_TOKEN, REQUEST_CEILING, Ledger
 from .bench_score import score
@@ -208,7 +209,7 @@ def download(dataset):
     print(f"Downloaded {len(files)} files at {REVISION}", flush=True)
 
 
-def prepare(dataset, root):
+def prepare(dataset, root, source_indexes=None):
     import yaml
 
     dataset, root = Path(dataset).absolute(), Path(root).absolute()
@@ -259,7 +260,19 @@ def prepare(dataset, root):
                     "existing index has old coverage or schema; prepare in a separate root"
                 )
         else:
-            meta = create_index(dataset / "sre" / name, output, scenario)
+            if source_indexes is not None:
+                evidence_files = {
+                    relative
+                    for _, relative, _ in snapshot_files(dataset / "sre" / name)
+                }
+                meta = upgrade_index(
+                    confined(Path(source_indexes), f"{name}.sqlite3"),
+                    output,
+                    scenario,
+                    {k: v for k, v in expected.items() if k in evidence_files},
+                )
+            else:
+                meta = create_index(dataset / "sre" / name, output, scenario)
             output.chmod(0o444)
         indexes[name] = {**meta, "path": str(output), "sha256": file_hash(output)}
         print(f"Prepared {name}: {meta['counts']}", flush=True)
@@ -428,7 +441,14 @@ def trial_config(campaign, prepared, scenario, trial, seed):
             },
             "executor": {"factory": "dowser.core:executor"},
             "verifier": {"factory": "dowser.core:verifier"},
-            "incident_loop": {"factory": "dowser.loop:incident_loop"},
+            "incident_loop": {
+                "factory": "dowser.loop:incident_loop",
+                "settings": {
+                    "bounded_runtime_view": True,
+                    "batch_diagnostics": True,
+                    "profile": True,
+                },
+            },
         }
     )
 
@@ -518,8 +538,10 @@ async def run_trial(campaign, prepared, scenario, trial, seed, phase, base):
                         output=str(output),
                         seed=seed,
                     ),
-                    AppContext({}, Limits(), base),
+                    AppContext({"event_store": store}, Limits(), base),
                 )
+                plugin.revision = working(state)["revision"]
+                await plugin.candidates(state)
                 # If interruption occurred after writing but before parse admission,
                 # the previous nomination state still determines the same output.
                 if read_json(output) != plugin.diagnosis(working(state)["nominations"]):
@@ -609,11 +631,39 @@ async def run_trial(campaign, prepared, scenario, trial, seed, phase, base):
             recorded["category"] = "context"
     recorded.update(ledger.stats(trial))
     reads, recalled, keys = 0, 0, []
+    decisions, navigation = [], []
+    semantic_findings = set()
+    semantic_repeats = 0
+    omitted_facts = 0
     for event in events:
+        if event["kind"] == "provider_request":
+            omitted_facts = max(
+                omitted_facts,
+                event["payload"]["request"]
+                .get("memory", {})
+                .get("progress", {})
+                .get("omitted_facts", 0),
+            )
+        if event["kind"] == "parse_outcome":
+            for fact in event["payload"]["parse"].get("memory_facts", []):
+                value = fact["payload"]
+                if value.get("meaningful"):
+                    findings = {
+                        (value.get("entity"), fp)
+                        for fp in value.get("semantic_fingerprints", [])
+                    }
+                    semantic_repeats += int(
+                        bool(findings) and findings <= semantic_findings
+                    )
+                    semantic_findings.update(findings)
         if event["kind"] != "execution_started":
             continue
         args = event["payload"].get("candidate", {}).get("args", {})
         operation = args.get("operation")
+        identity = event["payload"].get("identity", {})
+        decisions.append(dumps(identity))
+        if operation in {"browse", "focus", "recall"}:
+            navigation.append(dumps(identity))
         recalled += int(operation == "recall")
         if operation in {"inspect", "next"}:
             reads += 1
@@ -629,6 +679,12 @@ async def run_trial(campaign, prepared, scenario, trial, seed, phase, base):
         external_evidence_reads=reads,
         recalled_evidence_pages=recalled,
         repeated_external_reads=reads - len(set(keys)),
+        repeated_decisions=len(decisions) - len(set(decisions)),
+        navigation_cycles=len(navigation) - len(set(navigation)),
+        semantic_novelty=len(semantic_findings),
+        semantic_repeats=semantic_repeats,
+        omitted_facts=omitted_facts,
+        provider_timings=ledger.timings(trial),
     )
     recorded["failure_details"] = ledger.diagnostics(trial)
     recorded["response_adjustments"] = sum(
@@ -752,6 +808,14 @@ def report(campaign):
             r.get("repeated_external_reads", 0) for r in completed
         ),
     }
+    for metric in (
+        "repeated_decisions",
+        "navigation_cycles",
+        "semantic_novelty",
+        "semantic_repeats",
+        "omitted_facts",
+    ):
+        summary[metric] = sum(r.get(metric, 0) for r in completed)
     atomic_json(campaign / "summary.json", summary)
     with (campaign / "results.jsonl").open("w") as handle:
         for row in completed:
@@ -776,6 +840,11 @@ def report(campaign):
         "external_evidence_reads",
         "recalled_evidence_pages",
         "repeated_external_reads",
+        "repeated_decisions",
+        "navigation_cycles",
+        "semantic_novelty",
+        "semantic_repeats",
+        "omitted_facts",
     ]
     with (campaign / "results.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
@@ -1079,6 +1148,12 @@ def main(argv=None):
             sub.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
         if name in {"prepare", "run"}:
             sub.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+        if name == "prepare":
+            sub.add_argument(
+                "--source-indexes",
+                type=Path,
+                help="Copy matching sanitized indexes into a separate versioned preparation root",
+            )
         if name == "run":
             sub.add_argument(
                 "--campaign", default=datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -1117,7 +1192,7 @@ def main(argv=None):
         if args.command == "download":
             download(args.dataset)
         elif args.command == "prepare":
-            prepare(args.dataset, args.root)
+            prepare(args.dataset, args.root, args.source_indexes)
         elif args.command == "run":
             from plugins.escalation import Settings as EscalationSettings
 

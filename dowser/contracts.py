@@ -125,6 +125,14 @@ class EventStore(Protocol):
     async def aclose(self) -> None: ...
 
 
+class DiagnosticBatchStore(Protocol):
+    """Optional transaction for non-effect events; effect boundaries stay separate."""
+
+    async def append_many(
+        self, incident_id: str, events: list[tuple[str, dict]]
+    ) -> list[Event]: ...
+
+
 class ToolRegistry(Protocol):
     interface_version: str
 
@@ -246,7 +254,12 @@ OPTIONAL_INTERFACES = {
     "decision_provider": {"capabilities": 0},
     "tool_plugin": {"action_identity": 2, "extract_memory": 2},
     "tool_registry": {"action_identity": 2},
-    "event_store": {"action_count": 2, "memory": 3, "cached_reads": 1},
+    "event_store": {
+        "action_count": 2,
+        "memory": 3,
+        "cached_reads": 1,
+        "append_many": 2,
+    },
 }
 
 

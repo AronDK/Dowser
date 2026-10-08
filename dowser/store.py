@@ -57,7 +57,7 @@ class SQLiteStore(Component):
 
     def _initialize(self):
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, 2):
+        if version not in (0, 1, 2, 3):
             raise ValueError("unsupported SQLite store schema version")
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA journal_mode=WAL")
@@ -114,12 +114,53 @@ class SQLiteStore(Component):
                 self.connection.execute(
                     "ALTER TABLE memory_actions ADD COLUMN detail TEXT NOT NULL DEFAULT '{}'"
                 )
+            self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS memory_hypotheses(incident_id TEXT NOT NULL,entity TEXT NOT NULL,sequence INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(incident_id,entity),FOREIGN KEY(incident_id,sequence) REFERENCES events(incident_id,sequence))"
+            )
             if version < 2:
                 for incident, sequence, kind, payload in self.connection.execute(
                     "SELECT incident_id,sequence,kind,payload FROM events ORDER BY incident_id,sequence"
                 ).fetchall():
                     self._project(incident, sequence, kind, json.loads(payload))
-            self.connection.execute("PRAGMA user_version=2")
+            if version == 2:
+                for incident, seq, payload in self.connection.execute(
+                    "SELECT incident_id,sequence,payload FROM memory_facts ORDER BY rowid"
+                ).fetchall():
+                    self._hypothesis_fact(incident, seq, json.loads(payload))
+            self.connection.execute("PRAGMA user_version=3")
+
+    def _hypothesis_fact(self, incident, sequence, fact):
+        entity = fact.get("entity")
+        if not entity:
+            return
+        prior = self.connection.execute(
+            "SELECT payload FROM memory_hypotheses WHERE incident_id=? AND entity=?",
+            (incident, entity),
+        ).fetchone()
+        hypothesis = (
+            json.loads(prior[0])
+            if prior
+            else {
+                "entity": entity,
+                "supporting_facts": [],
+                "refuting_facts": [],
+                "coverage": [],
+                "outcomes": {},
+                "unresolved_questions": [
+                    "Is this entity causally relevant?",
+                    "Is the inspected evidence sufficient?",
+                    "Which observations support or refute an independent cause?",
+                ],
+            }
+        )
+        hypothesis["coverage"] = sorted(
+            set(hypothesis["coverage"]) | {fact.get("kind", "unknown")}
+        )
+        hypothesis["evidence_digest"] = fact.get("semantic_fingerprints", [])
+        self.connection.execute(
+            "INSERT OR REPLACE INTO memory_hypotheses VALUES(?,?,?,?)",
+            (incident, entity, sequence, json.dumps(hypothesis)),
+        )
 
     def _project(self, incident, sequence, kind, payload):
         facts = []
@@ -172,6 +213,7 @@ class SQLiteStore(Component):
         elif kind == "parse_outcome":
             facts = facts_from_parse(ParseResult.model_validate(payload["parse"]))
         for item, fact in enumerate(facts):
+            self._hypothesis_fact(incident, sequence, fact.payload)
             self.connection.execute(
                 "INSERT INTO memory_facts VALUES (?,?,?,?,?,?,?,?)",
                 (
@@ -286,6 +328,10 @@ class SQLiteStore(Component):
                 f"SELECT incident_id,sequence,fact_key,resource_id,payload,refs,status FROM memory_facts WHERE incident_id IN ({marks}) ORDER BY rowid DESC",
                 incidents,
             ).fetchall()
+            hypotheses_rows = self.connection.execute(
+                f"SELECT incident_id,payload FROM memory_hypotheses WHERE incident_id IN ({marks}) ORDER BY sequence DESC LIMIT 8",
+                incidents,
+            ).fetchall()
             actions = self.connection.execute(
                 f"SELECT incident_id,sequence,identity,tool,args,status,parse_status,detail FROM memory_actions WHERE incident_id IN ({marks}) ORDER BY rowid DESC",
                 incidents,
@@ -339,7 +385,13 @@ class SQLiteStore(Component):
             }
             for incident, seq, ident, tool, args, status, parsed, detail in actions[:8]
         ]
+        hypotheses = [
+            {**json.loads(payload), "historical": incident != state.incident_id}
+            for incident, payload in hypotheses_rows
+        ]
+        hypotheses.sort(key=lambda h: h["entity"] in relevant, reverse=True)
         return {
+            "hypotheses": hypotheses,
             "facts": selected,
             "actions": recent,
             "progress": {
@@ -391,6 +443,23 @@ class SQLiteStore(Component):
         with self.lock, self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             return self._append(incident_id, kind, payload, artifacts)
+
+    async def append_many(self, incident_id, events):
+        allowed = {
+            "validation_outcome",
+            "candidate_snapshot",
+            "provider_request",
+            "provider_capabilities",
+            "context_check",
+            "harness_timing",
+        }
+        if any(kind not in allowed for kind, payload in events):
+            raise ValueError("batch contains an effect or evidence admission boundary")
+        with self.lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            return [
+                self._append(incident_id, kind, payload) for kind, payload in events
+            ]
 
     async def history(self, incident_id):
         with self.lock:

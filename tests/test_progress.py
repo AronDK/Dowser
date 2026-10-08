@@ -304,3 +304,191 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "separate root"):
             create_index(self.index.path.parent, self.index.path, 1)
         self.assertEqual(before, self.index.path.read_bytes())
+
+
+class RuntimeViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_thousand_outcomes_are_bounded_and_history_reconstructs(self):
+        from dowser.core import runtime_view
+        from dowser.models import Observation, ParseResult
+        from dowser.store import SQLiteStore
+
+        with tempfile.TemporaryDirectory() as root:
+            store = SQLiteStore(Path(root) / "events.sqlite3")
+            s = IncidentState(
+                incident_id="bounded",
+                alert={},
+                desired_state={},
+                resources=[
+                    {"id": "one", "platform": "fixture", "platform_version": "1"}
+                ],
+            )
+            await store.ingest(s)
+            sizes = []
+            for i in range(1000):
+                observation = Observation(
+                    resource_id="one",
+                    kind="investigation",
+                    payload={"revision": i, "content": "x" * 2000},
+                )
+                parsed = ParseResult(
+                    status="valid", parser_version="fixture", observations=[observation]
+                )
+                outcome = {
+                    "execution_id": str(i),
+                    "status": "succeeded",
+                    "parse": parsed.model_dump(mode="json"),
+                }
+                await store.append("bounded", "execution_result", outcome)
+                await store.append(
+                    "bounded",
+                    "parse_outcome",
+                    {"parse": parsed.model_dump(mode="json")},
+                )
+                s.attempts.append(outcome)
+                s.observations.append(observation)
+                s = runtime_view(s).model_copy(deep=True)
+                self.assertLessEqual(len(s.observations), 1)
+                self.assertLessEqual(len(s.attempts), 8)
+                sizes.append(len(s.model_dump_json()))
+            self.assertLess(max(sizes), 30000)
+            reconstructed = await store.reconstruct("bounded")
+            self.assertEqual(len(reconstructed.attempts), 1000)
+            self.assertEqual(len(reconstructed.observations), 1000)
+            await store.aclose()
+
+    async def test_batch_is_atomic_ordered_and_cannot_include_effect_boundaries(self):
+        from dowser.store import SQLiteStore
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "events.sqlite3"
+            store = SQLiteStore(path)
+            s = IncidentState(
+                incident_id="batch",
+                alert={},
+                desired_state={},
+                resources=[
+                    {"id": "one", "platform": "fixture", "platform_version": "1"}
+                ],
+            )
+            await store.ingest(s)
+            events = await store.append_many(
+                "batch",
+                [("context_check", {"fits": True}), ("provider_request", {"round": 1})],
+            )
+            self.assertEqual([e.sequence for e in events], [2, 3])
+            with self.assertRaises(ValueError):
+                await store.append_many(
+                    "batch",
+                    [
+                        ("context_check", {}),
+                        ("provider_request", {"password": "never"}),
+                    ],
+                )
+            self.assertEqual(len(await store.history("batch")), 3)
+            for kind in (
+                "execution_started",
+                "raw_output",
+                "parse_outcome",
+                "execution_result",
+            ):
+                with self.assertRaises(ValueError):
+                    await store.append_many("batch", [(kind, {})])
+            self.assertEqual(
+                store.connection.execute("PRAGMA synchronous").fetchone()[0], 2
+            )
+            await store.aclose()
+            reopened = SQLiteStore(path)
+            self.assertEqual(
+                [e.sequence for e in await reopened.history("batch")], [1, 2, 3]
+            )
+            await reopened.aclose()
+
+
+class ProgressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_target_knowledge_rearms_actions_and_unrelated_findings_do_not(self):
+        from test_itbench_aa import ENTITY, fixture
+
+        from dowser.bench_data import create_index
+        from dowser.models import RawIncident
+        from plugins.itbench_aa import Normalizer, Plugin, Settings
+
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            fixture(root / "source")
+            create_index(root / "source", root / "index.sqlite3", 8)
+            settings = Settings(
+                index=str(root / "index.sqlite3"),
+                scenario=8,
+                trial="progress",
+                output=str(root / "output.json"),
+            )
+            context = AppContext({}, Limits(), root)
+            state = await Normalizer(settings, context).normalize(
+                RawIncident(
+                    source_id="itbench-aa",
+                    event_id="progress",
+                    payload={"scenario": 8, "trial": "progress"},
+                )
+            )
+            plugin = Plugin(settings, context)
+            focus = next(
+                c
+                for c in await plugin.candidates(state)
+                if c.args["operation"] == "focus" and c.args["entity"] == ENTITY
+            )
+            initial = await plugin.action_identity(focus, state)
+            plugin.read_cache["unrelated"] = {"records": [], "next": None}
+            plugin.findings["other/Pod/other"] = {"new"}
+            self.assertEqual(initial, await plugin.action_identity(focus, state))
+            plugin.admit_page(ENTITY, plugin.index.page(ENTITY, "configuration"))
+            changed = await plugin.action_identity(focus, state)
+            self.assertNotEqual(initial.decision_state, changed.decision_state)
+            plugin.admit_page(ENTITY, plugin.index.page(ENTITY, "raw_configuration"))
+            self.assertEqual(changed, await plugin.action_identity(focus, state))
+
+    async def test_earlier_owned_evidence_supports_nomination_after_navigation(self):
+        from test_itbench_aa import ENTITY, fixture
+
+        from dowser.bench_data import create_index
+        from dowser.models import RawIncident
+        from plugins.itbench_aa import Normalizer, Plugin, Settings
+
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            fixture(root / "source")
+            create_index(root / "source", root / "index.sqlite3", 8)
+            settings = Settings(
+                index=str(root / "index.sqlite3"),
+                scenario=8,
+                trial="admission",
+                output=str(root / "output.json"),
+            )
+            context = AppContext({}, Limits(), root)
+            state = await Normalizer(settings, context).normalize(
+                RawIncident(
+                    source_id="itbench-aa",
+                    event_id="admission",
+                    payload={"scenario": 8, "trial": "admission"},
+                )
+            )
+            plugin = Plugin(settings, context)
+            rid = plugin.index.refs(ENTITY, "configuration")[0]
+            with self.assertRaisesRegex(ValueError, "admitted"):
+                plugin.diagnosis(
+                    {ENTITY: {"reason": "configuration", "records": [rid]}}
+                )
+            for op in ("focus", "inspect", "browse", "focus", "nominate"):
+                choices = await plugin.candidates(state)
+                choice = next(
+                    c
+                    for c in choices
+                    if c.args["operation"] == op
+                    and (op != "focus" or c.args["entity"] == ENTITY)
+                    and (op != "inspect" or c.args["kind"] == "configuration")
+                    and (op != "nominate" or c.args["reason"] == "configuration")
+                )
+                parsed = await plugin.parse(choice, await plugin.execute(choice, state))
+                state.observations.extend(parsed.observations)
+            from plugins.itbench_aa import working
+
+            self.assertEqual(working(state)["nominations"][ENTITY]["records"], [rid])

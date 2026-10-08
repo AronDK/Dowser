@@ -76,6 +76,7 @@ class ActionIdentity(Boundary):
 
 
 class InvestigationMemory(Boundary):
+    hypotheses: list[dict[str, JsonValue]] = Field(default_factory=list)
     facts: list[dict[str, JsonValue]] = Field(default_factory=list)
     actions: list[dict[str, JsonValue]] = Field(default_factory=list)
     progress: dict[str, JsonValue] = Field(default_factory=dict)

@@ -216,28 +216,29 @@ def required_view(state):
     return list(latest.values())
 
 
+def runtime_view(state, candidates=(), recent_outcomes=8):
+    """Select before copying: retain latest and explicitly required observations."""
+    observations = required_view(state)
+    needed = {oid for c in candidates for oid in c.required_observation_ids}
+    present = {o.id for o in observations}
+    observations.extend(o for o in state.observations if o.id in needed - present)
+    return state.model_copy(
+        update={
+            "observations": observations,
+            "attempts": state.attempts[-recent_outcomes:] if recent_outcomes else [],
+        }
+    )
+
+
 class DefaultContextBuilder(Component):
     def __init__(self, settings, store=None):
         self.settings = settings
         self.store = store
 
     async def build(self, state, candidates):
-        view = state.model_copy(deep=True)
-        view.observations = required_view(state)
-        needed = {
-            oid
-            for candidate in candidates
-            for oid in candidate.required_observation_ids
-        }
-        present = {o.id for o in view.observations}
-        view.observations.extend(
-            o for o in state.observations if o.id in needed - present
-        )
-        view.attempts = (
-            state.attempts[-self.settings.recent_outcomes :]
-            if self.settings.recent_outcomes
-            else []
-        )
+        view = runtime_view(
+            state, candidates, self.settings.recent_outcomes
+        ).model_copy(deep=True)
         memory = None
         if self.store is not None:
             lookup = getattr(self.store, "memory", None)
@@ -266,6 +267,8 @@ class DefaultContextBuilder(Component):
                     memory.progress["omitted_facts"] = (
                         int(memory.progress.get("omitted_facts", 0)) + 1
                     )
+                elif memory.hypotheses:
+                    memory.hypotheses.pop()
                 elif len(memory.actions) > 1:
                     memory.actions.pop()
                 else:
@@ -290,6 +293,9 @@ class DefaultContextBuilder(Component):
                 request.memory.progress["omitted_facts"] = (
                     int(request.memory.progress.get("omitted_facts", 0)) + 1
                 )
+                return request
+            if request.memory.hypotheses:
+                request.memory.hypotheses.pop()
                 return request
             if len(request.memory.actions) > 1:
                 request.memory.actions.pop()
