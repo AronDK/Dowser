@@ -788,6 +788,16 @@ class EvidenceIndex:
                     "summary", annotations.get("description", "")
                 ),
             }
+            # Namespace/service already encode that identity. Keep other targets
+            # explicit without spending the alert budget on redundant fields.
+            service_entity = identity(
+                summary["namespace"], "Service", summary["service"]
+            )
+            extra_entities = [e for e in summary.pop("entities") if e != service_entity]
+            if extra_entities:
+                summary["entities"] = extra_entities
+            if summary["causal_shortlist"]:
+                summary.pop("causal_shortlist")
             key = (summary["alert"], summary["namespace"], summary["service"])
             if row.get("state") == "firing" and key not in summaries:
                 summary["evidence_ref"] = self.record(rid)["ref"]

@@ -109,7 +109,17 @@ def order_entities(index, seed):
     causal_alerts = [
         a for a in index.alert_summaries() if a.get("causal_shortlist", True)
     ]
-    named = {e for a in causal_alerts for e in a.get("entities", []) if e in entities}
+    named = {
+        e
+        for alert in causal_alerts
+        for e in [
+            *alert.get("entities", []),
+            f"{alert['namespace']}/Service/{alert['service']}"
+            if alert.get("namespace") and alert.get("service")
+            else "",
+        ]
+        if e in entities
+    }
     relations = index.relationships()
     neighbourhood = set(named)
     for _ in range(2):

@@ -724,3 +724,63 @@ class RequiredEvidenceTests(unittest.IsolatedAsyncioTestCase):
             ).run(state)
             self.assertEqual(result.outcome, "resolved")
             self.assertEqual(await store.observations("other", [old.id]), [])
+
+
+class AlertProjectionTests(unittest.TestCase):
+    def test_compact_alerts_preserve_identities_provenance_and_informational_status(
+        self,
+    ):
+        from test_itbench_aa import fixture
+
+        from dowser.bench_data import EvidenceIndex, atomic_json, create_index, dumps
+
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            fixture(root / "source")
+            alerts = [
+                {
+                    "state": "firing",
+                    "labels": {
+                        "alertname": f"Alert{i}",
+                        "namespace": "otel-demo",
+                        "service_name": "payment",
+                    },
+                    "annotations": {
+                        "summary": "A service condition was observed; inspect the referenced evidence."
+                    },
+                }
+                for i in range(28)
+            ]
+            alerts.extend(
+                [
+                    {
+                        "state": "firing",
+                        "labels": {"alertname": "NodeCondition", "node": "worker"},
+                        "annotations": {"summary": "Node condition observed"},
+                    },
+                    {
+                        "state": "firing",
+                        "labels": {"alertname": "Watchdog"},
+                        "annotations": {"summary": "Informational signal"},
+                    },
+                ]
+            )
+            atomic_json(
+                root / "source" / "alerts" / "alerts_in_alerting_state_1.json",
+                {"data": {"alerts": alerts}},
+            )
+            create_index(root / "source", root / "index.sqlite3", 8)
+            summaries = EvidenceIndex(root / "index.sqlite3", 8).alert_summaries()
+            self.assertEqual(len(summaries), len(alerts))
+            self.assertLessEqual(len(dumps(summaries).encode()), 8192)
+            for summary in summaries:
+                self.assertIn("evidence_ref", summary)
+                if summary["alert"].startswith("Alert"):
+                    self.assertEqual(summary["namespace"], "otel-demo")
+                    self.assertEqual(summary["service"], "payment")
+                    self.assertNotIn("entities", summary)
+                    self.assertTrue(summary.get("causal_shortlist", True))
+                elif summary["alert"] == "NodeCondition":
+                    self.assertEqual(summary["entities"], ["cluster/Node/worker"])
+                else:
+                    self.assertFalse(summary["causal_shortlist"])

@@ -73,3 +73,15 @@ No paid calls, fresh pilot or live full campaign were run. Real-Jev counterfactu
 validation (five repetitions per condition, at least four correct) and a fresh
 pilot require separate authorization. Offline checks establish implementation
 behavior; an accuracy improvement has not been measured.
+
+## Pilot preflight follow-up
+
+The first authorized pilot attempt stopped during all-scenario preflight before
+creating any trial or paid reservation. Two expanded public-alert views exceeded
+8 KiB because service identities and positive shortlist flags repeated information
+already present in the alert fields. The projection now encodes each service once
+through namespace/service, keeps other entity targets explicit, and retains all
+alert text and source references. Informational shortlist flags remain explicit.
+All forty real-snapshot initial contexts now fit (maximum alert view: 7,563 bytes).
+The 17 progress tests, 15 memory tests and four assessment tests passed after the
+correction. The failed preflight campaign remains preserved separately.
