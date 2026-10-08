@@ -172,6 +172,12 @@ maximum. Optional JSON `metadata` can identify the model or capability version.
 This method reports capabilities without invoking model inference. Its signature
 is checked during constructor-free factory validation when present.
 
+Metadata `allow_escalation: false` forbids a model-selected escalation response;
+the loop rejects it before execution. Jev supports an optional provider-owned
+`decision_policy` factory with `controls`, async `apply(request, decision,
+alternatives)` and `aclose()`. This extension does not add a mandatory slot.
+See [escalation controls and penalties](escalation.md).
+
 One call to `decide` constitutes a model decision round. A provider advertising a
 capacity of 64 may return up to 64 decisions in that response:
 

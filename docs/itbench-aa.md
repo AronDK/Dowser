@@ -90,6 +90,9 @@ Defaults are pinned `jev-1.13.0`, no call-count ceiling, a 30-minute incident
 watchdog, a 15-second tool timeout, a 10-second provider timeout, one identical
 semantic action per unchanged decision state, and 600-second observation freshness.
 SQLite provides [cumulative memory and recall](memory.md). There is no fallback model.
+Model-selected escalation is disabled by default. Optional
+[exit penalties](escalation.md) require explicit `--allow-model-escalation`; the
+enabled flag and penalty are part of the frozen campaign configuration.
 HTTP 408/429/5xx and transport failures permit at most two
 retries with exponential backoff, jitter and `Retry-After`/`Retry-After-ms` handling; the provider
 deadline covers all attempts and delays. Invalid responses are not retried.

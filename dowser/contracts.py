@@ -97,6 +97,21 @@ class DecisionCapabilityProvider(Protocol):
     async def capabilities(self) -> DecisionCapabilities: ...
 
 
+class DecisionPolicy(Protocol):
+    """Optional provider-owned policy plugin, not a mandatory execution slot."""
+
+    interface_version: str
+    controls: Any
+
+    async def apply(
+        self,
+        request: DecisionRequest,
+        decision: DecisionResult,
+        alternatives: Mapping[str, DecisionResult],
+    ) -> DecisionResult: ...
+    async def aclose(self) -> None: ...
+
+
 class EventStore(Protocol):
     interface_version: str
 
@@ -226,6 +241,7 @@ INTERFACES = {
     "scheduler": {"select": 1},
 }
 INTERFACES["tool_plugin"] = INTERFACES["tool_registry"]
+INTERFACES["decision_policy"] = {"apply": 3}
 OPTIONAL_INTERFACES = {
     "decision_provider": {"capabilities": 0},
     "tool_plugin": {"action_identity": 2, "extract_memory": 2},

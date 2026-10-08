@@ -49,6 +49,11 @@ confidence, returned model version, token usage and request latency are recorded
 `score_metadata`; confidence does not authorize execution or resolution. The existing
 policy, executor and verifier retain their responsibilities.
 
+Model-selected escalation is configurable through `allow_escalation` and an
+optional [exit-penalty plugin](escalation.md). Benchmark profiles disable it by
+default; generic Jev profiles retain penalty 1. Native and policy-adjusted
+decisions are recorded separately, and scores do not authorize actions.
+
 `capabilities()` advertises one decision per round. The default maximum is 253
 candidates, leaving two of the API's 255 Choice options for wait and escalation.
 Independent questions in a Jev request do not describe an ordered execution plan.

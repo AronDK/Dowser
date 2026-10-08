@@ -360,6 +360,12 @@ class DefaultIncidentLoop(Component):
                         return await terminate(
                             "provider exceeded its advertised model decision capacity"
                         )
+                    if capabilities.metadata.get(
+                        "allow_escalation", True
+                    ) is False and any(d.operation == "escalate" for d in decisions):
+                        raise ValueError(
+                            "provider returned a disabled escalation operation"
+                        )
                     supplied = {candidate.id for candidate in allowed}
                     if any(
                         decision.operation == "select"

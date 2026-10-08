@@ -56,7 +56,7 @@ class Configuration(Boundary):
     intake: IntakeSettings = Field(default_factory=IntakeSettings)
 
 
-SLOTS = tuple(k for k in INTERFACES if k != "tool_plugin")
+SLOTS = tuple(k for k in INTERFACES if k not in {"tool_plugin", "decision_policy"})
 INTAKE_SLOTS = ("incident_source", "normalizer", "scheduler")
 EXECUTION_SLOTS = tuple(slot for slot in SLOTS if slot not in INTAKE_SLOTS)
 
@@ -127,6 +127,15 @@ def load_factory(ref: FactoryReference, subsystem: str):
             "factory must accept settings and application context"
         ) from exc
     settings = fn.settings_model.model_validate(ref.settings)
+    if (
+        subsystem == "decision_provider"
+        and getattr(settings, "escalation_policy", None) is not None
+    ):
+        policy, _ = load_factory(settings.escalation_policy, "decision_policy")
+        if not set(policy.dependencies) <= set(fn.dependencies):
+            raise ConfigurationError(
+                "decision policy requests services not declared by provider factory"
+            )
     if subsystem == "tool_plugin":
         tools = getattr(fn.component_type, "tools", None)
         if not isinstance(tools, tuple) or not tools:

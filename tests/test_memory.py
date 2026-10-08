@@ -324,9 +324,14 @@ class RecallTests(unittest.IsolatedAsyncioTestCase):
                     return DecisionResult(operation="select", candidate_id=choice.id)
 
                 with patch.object(JevProvider, "decide", decide):
-                    async with Application(
-                        trial_config(root / "campaign", prepared, 8, "loop", 42), root
-                    ) as app:
+                    config = trial_config(root / "campaign", prepared, 8, "loop", 42)
+                    if sequence[-1] == "escalate":
+                        config.decision_provider.settings["allow_escalation"] = True
+                        config.decision_provider.settings["escalation_policy"][
+                            "settings"
+                        ]["enabled"] = True
+                        config.normalizer.settings["allow_escalation"] = True
+                    async with Application(config, root) as app:
                         normalizer = app.services["normalizer"]
                         s = await normalizer.normalize(
                             RawIncident(

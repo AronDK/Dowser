@@ -881,6 +881,10 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
         with self.simulated(), patch("builtins.print"):
             await run_campaign(root, "offline-campaign", base=self.base)
         self.assertEqual(len(self.calls), 520)
+
+        async def no_cooldown(seconds):
+            pass
+
         with (
             self.simulated(outage=True),
             patch(
@@ -889,17 +893,17 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
                     b"0.042; 64k tokens per request; Output tokens are free"
                 ),
             ),
+            patch("dowser.bench.asyncio.sleep", side_effect=no_cooldown),
             patch("builtins.print"),
         ):
-            failed = await run_campaign(root, "failed-pilot", base=self.base)
+            failed = await run_campaign(
+                root, "failed-pilot", phase="pilot", base=self.base
+            )
         failed_summary = report(failed)
-        self.assertEqual(failed_summary["pilot_trials"], 1)
+        self.assertEqual(failed_summary["pilot_trials"], 10)
         self.assertEqual(failed_summary["full_trials"], 0)
-        self.assertEqual(failed_summary["pilot_categories"], {"provider": 1})
-        self.assertEqual(len(self.calls), 523)
-
-        async def no_cooldown(seconds):
-            pass
+        self.assertEqual(failed_summary["pilot_categories"], {"provider": 10})
+        self.assertEqual(len(self.calls), 550)
 
         with (
             self.simulated(full_transient=True),

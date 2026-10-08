@@ -220,3 +220,52 @@ cumulative memory, semantic repetition/recall, tests and documentation. Existing
 verification and real-model validation are recorded above; no regression suites
 were repeated during this stop/publication task. Credentials, datasets and runtime
 artifacts remain local.
+
+## Configurable escalation — 2026-10-08
+
+The native pilot completed ten case records: 1/10 exact accuracy and mean score
+0.1, with six model escalations, two provider failures, one correct submission
+and one user interruption. These results remain attached to the original
+escalation-enabled profile. Focused memory validation remains 30/30, controls 9/15.
+No full campaign or ALFworld run was started.
+
+The user requested configurable exit weighting and confirmed that higher values
+should discourage exit. New benchmark profiles disable model-selected escalation
+by default. Generic Jev retains its native choice with penalty 1; the optional
+provider-owned plugin can apply a larger penalty to a native escalation, choosing
+a higher-scored supplied alternative while preserving raw/native evidence.
+Operational stops remain independent. See [escalation configuration](escalation.md).
+CLI flags and JSON settings are documented there; new profiles require a new
+campaign, and no paid rerun was started as part of this implementation.
+
+170 relevant tests passed: 50 targeted policy/provider/memory/resume, 116 private
+core, 4 CLI and benchmark integration checks. Formatting/lint/diff checks and
+package build passed. Config validation remains constructor-free; plugin
+lifecycle is owned by the provider, and no mandatory execution slot was added.
+
+## Escalation-disabled pilot verification and results — 2026-10-08
+
+All135 tracked offline tests and116 private core tests passed (251 distinct tests),
+including native/adjusted decision auditing, constructor/lifecycle compatibility,
+benchmark profiles, full simulated campaigns and no-replay safeguards. An outdated
+transient-failure fixture was corrected to expect ten retained provider failures
+and to simulate cooldowns. Formatting/lint/diff and package build checks passed.
+
+A fresh ten-case pilot with model-selected escalation disabled recorded2/10 exact
+accuracy and mean score0.2, compared with1/10 in the earlier escalation-enabled
+pilot. This small adapted public-subset result is not an official AA score.
+Seven diagnoses were submitted (two correct, five wrong); three cases stopped
+without a diagnosis: scenario16 hit the30-minute incident watchdog, scenario17
+exhausted applicable actions after repeat suppression, and scenario7 hit the
+10-second decision deadline. Recorded model-selected escalations:zero.
+
+The pilot used2924 HTTP attempts,38,931,816 known input and322,826 output tokens,
+1426 external evidence reads,829 recalls and zero repeated external reads. Cost
+added$1.637824272, with cumulative accounted spending$5.900684244 including prior
+campaigns and unknown reservations. Prior artifacts passed hash checks. No full
+campaign or ALFworld run was started. Reports/history remain under the gitignored
+`.local/itbench-aa/jev-noesc-20261008/` directory.
+
+The user authorized pushing this validated iteration before snapshot-based failure
+analysis and an implementation plan. Timeout or investigation-policy improvements
+are subsequent work and have not changed the completed pilot's frozen profile.

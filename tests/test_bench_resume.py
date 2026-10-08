@@ -168,6 +168,15 @@ class PilotContinuationTests(unittest.IsolatedAsyncioTestCase):
     async def test_saved_deadline_failure_is_not_replayed_and_six_unrun_cases_advance(
         self,
     ):
+        await self.check_saved_cases(False)
+
+    async def test_user_interrupted_case_is_retained_and_only_five_unrun_cases_advance(
+        self,
+    ):
+        await self.check_saved_cases(True)
+
+    async def check_saved_cases(self, interrupted):
+        saved_count = 5 if interrupted else 4
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             (base / "uv.lock").write_text("fixture lock")
@@ -187,7 +196,7 @@ class PilotContinuationTests(unittest.IsolatedAsyncioTestCase):
             campaign.mkdir()
             ledger = Ledger(campaign / "spending.sqlite3")
             saved_hashes = {}
-            for i, scenario in enumerate(PILOT[:4]):
+            for i, scenario in enumerate(PILOT[:saved_count]):
                 trial = f"pilot-s{scenario}"
                 call = ledger.reserve(trial)
                 if i != 3:
@@ -197,6 +206,8 @@ class PilotContinuationTests(unittest.IsolatedAsyncioTestCase):
                 category = (
                     "provider" if i == 3 else "completed" if i == 2 else "abandoned"
                 )
+                if i == 4:
+                    category = "interrupted"
                 row = {
                     "trial": trial,
                     "scenario": scenario,
@@ -224,7 +235,7 @@ class PilotContinuationTests(unittest.IsolatedAsyncioTestCase):
             async def trial_driver(
                 campaign, prepared, scenario, trial, seed, phase, base
             ):
-                if scenario in PILOT[:4]:
+                if scenario in PILOT[:saved_count]:
                     # Exercise the real early-return path for completed paid cases.
                     return await run_trial(
                         campaign, prepared, scenario, trial, seed, phase, base
@@ -252,17 +263,34 @@ class PilotContinuationTests(unittest.IsolatedAsyncioTestCase):
                 patch("dowser.bench.asyncio.sleep", cooldown),
                 patch("builtins.print"),
             ):
-                await run_campaign(root, "continuation", phase="pilot", base=base)
-            self.assertEqual(new_cases, list(PILOT[4:]))
+                if interrupted:
+                    await run_campaign(root, "continuation", phase="pilot", base=base)
+                    self.assertEqual(
+                        new_cases,
+                        [],
+                        "interrupted cases must require explicit continuation",
+                    )
+                await run_campaign(
+                    root,
+                    "continuation",
+                    phase="pilot",
+                    base=base,
+                    continue_interrupted=interrupted,
+                )
+            self.assertEqual(new_cases, list(PILOT[saved_count:]))
             self.assertEqual(ledger.stats()["calls"], 10)
             self.assertEqual(ledger.stats()["unknown_calls"], 1)
             self.assertEqual({p: file_hash(p) for p in saved_hashes}, saved_hashes)
-            cooldown.assert_awaited_once_with(60)
+            self.assertEqual(cooldown.await_count, 2 if interrupted else 1)
             summary = report(campaign)
             self.assertTrue(summary["pilot_finished"])
             self.assertEqual(summary["full_trials"], 0)
             self.assertEqual(summary["pilot_categories"]["provider"], 1)
-            self.assertAlmostEqual(summary["pilot_mean_score"], 0.7)
+            self.assertAlmostEqual(
+                summary["pilot_mean_score"], 0.6 if interrupted else 0.7
+            )
+            if interrupted:
+                self.assertEqual(summary["pilot_categories"]["interrupted"], 1)
             self.assertEqual(
                 json.loads(
                     (campaign / "trials" / f"pilot-s{PILOT[3]}.json").read_text()
