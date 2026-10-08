@@ -270,6 +270,7 @@ def strip_administration(value):
                 "creationTimestamp",
                 "lastTransitionTime",
                 "lastProbeTime",
+                "kubectl.kubernetes.io/last-applied-configuration",
             }
         }
     if isinstance(value, list):
@@ -765,7 +766,24 @@ class EvidenceIndex:
                 "service": labels.get("service_name", labels.get("service", "")),
                 "causal_shortlist": labels.get("alertname")
                 not in {"Watchdog", "InfoInhibitor"},
-                "entities": sorted(row_identities(row)),
+                "entities": sorted(
+                    row_identities(row)
+                    | {
+                        key
+                        for kind, attr in (
+                            ("Service", "service"),
+                            ("Deployment", "deployment"),
+                            ("Pod", "pod"),
+                            ("Node", "node"),
+                            ("ConfigMap", "configmap"),
+                        )
+                        if (
+                            key := identity(
+                                labels.get("namespace"), kind, labels.get(attr)
+                            )
+                        )
+                    }
+                ),
                 "summary": annotations.get(
                     "summary", annotations.get("description", "")
                 ),

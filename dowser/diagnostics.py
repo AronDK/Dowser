@@ -1,5 +1,6 @@
 """Typed failure details without arbitrary exception text or response bodies."""
 
+import asyncio
 from typing import Literal
 from uuid import UUID
 
@@ -87,10 +88,14 @@ class DiagnosticError(RuntimeError):
 def failure_details(error):
     if isinstance(error, DiagnosticError):
         return error.detail.model_dump(mode="json", exclude_none=True)
+    cancelled = isinstance(error, (asyncio.CancelledError, KeyboardInterrupt))
     accounting = type(error).__name__ in {"SpendingLimit", "CallLimit"}
     return FailureDetail(
         error_type=type(error).__name__,
-        code="spending_limit"
+        timeout_kind="user_cancellation" if cancelled else None,
+        code="user_cancelled"
+        if cancelled
+        else "spending_limit"
         if type(error).__name__ == "SpendingLimit"
         else "call_limit"
         if type(error).__name__ == "CallLimit"
@@ -100,7 +105,7 @@ def failure_details(error):
         category="accounting"
         if accounting
         else "timeout"
-        if isinstance(error, TimeoutError)
+        if cancelled or isinstance(error, TimeoutError)
         else "runtime",
         stage="accounting" if accounting else "decision",
     ).model_dump(mode="json", exclude_none=True)

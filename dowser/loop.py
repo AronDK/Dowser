@@ -18,6 +18,7 @@ from .models import (
     DecisionRequest,
     DecisionResult,
     ExecutionResult,
+    Observation,
     ParseResult,
     TerminalResult,
     TransportResult,
@@ -113,7 +114,10 @@ class DefaultIncidentLoop(Component):
                     seconds=min(remaining(), seconds) if seconds else remaining(),
                 )
             finally:
-                measure(fn.__name__, time.perf_counter() - started)
+                measure(
+                    getattr(fn, "__name__", type(fn).__name__),
+                    time.perf_counter() - started,
+                )
 
         async def record(kind, payload, artifacts=None):
             started = time.perf_counter()
@@ -176,7 +180,7 @@ class DefaultIncidentLoop(Component):
                     await call(
                         registry.validate,
                         candidate.model_copy(deep=True),
-                        copy_state(),
+                        copy_state([candidate]),
                     )
                 )
                 if result.allowed:
@@ -184,7 +188,7 @@ class DefaultIncidentLoop(Component):
                         await call(
                             policy.validate,
                             candidate.model_copy(deep=True),
-                            copy_state(),
+                            copy_state([candidate]),
                             budget,
                         )
                     )
@@ -271,6 +275,28 @@ class DefaultIncidentLoop(Component):
                     )
                 )
                 pending_recovery = None
+                if self.settings.bounded_runtime_view:
+                    missing = {
+                        oid
+                        for candidate in candidates
+                        for oid in candidate.required_observation_ids
+                    } - {o.id for o in state.observations}
+                    lookup = getattr(store, "observations", None)
+                    if missing and lookup:
+                        restored = [
+                            Observation.model_validate(value)
+                            for value in await call(
+                                lookup, state.incident_id, sorted(missing)
+                            )
+                        ]
+                        if any(
+                            o.id not in observed_ids or o.id not in missing
+                            for o in restored
+                        ):
+                            raise ValueError(
+                                "store returned unadmitted required observation"
+                            )
+                        state.observations.extend(restored)
                 ids, allowed, rejected = set(), [], []
                 for value in candidates:
                     candidate = ActionCandidate.model_validate(value).model_copy(
@@ -298,7 +324,7 @@ class DefaultIncidentLoop(Component):
                 request = DecisionRequest.model_validate(
                     await call(
                         builder.build,
-                        copy_state(),
+                        copy_state(allowed),
                         [c.model_copy(deep=True) for c in allowed],
                     )
                 )
@@ -514,7 +540,7 @@ class DefaultIncidentLoop(Component):
                             await call(
                                 executor.execute,
                                 selected.model_copy(deep=True),
-                                copy_state(),
+                                copy_state([selected]),
                                 seconds=min(
                                     selected.timeout_seconds, self.limits.tool_seconds
                                 ),
@@ -670,7 +696,7 @@ class DefaultIncidentLoop(Component):
                     verification = VerificationResult.model_validate(
                         await call(
                             verifier.verify,
-                            copy_state(),
+                            copy_state([selected]),
                             selected.model_copy(deep=True),
                             result.model_copy(deep=True),
                         )
@@ -715,7 +741,7 @@ class DefaultIncidentLoop(Component):
                     ):
                         pending_recovery = await call(
                             registry.recover,
-                            copy_state(),
+                            copy_state([selected]),
                             selected.model_copy(deep=True),
                             result.model_copy(deep=True),
                         )
@@ -755,7 +781,14 @@ class DefaultIncidentLoop(Component):
                     "execution_id": active["execution_id"] if active else None,
                 },
             )
-            await terminate("runtime failure or interruption")
+            cancelled = isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt))
+            if cancelled:
+                await record("user_cancellation", {"timeout_kind": "user_cancellation"})
+            await terminate(
+                "user cancelled incident"
+                if cancelled
+                else "runtime failure or interruption"
+            )
             raise
 
 

@@ -64,6 +64,8 @@ class ProviderSettings(JevSettings):
         default=None, gt=0, allow_inf_nan=False
     )
     strict_probabilities: bool = False
+    assessments: bool = False
+    noul_display_threshold: float = Field(default=0.5, ge=0, le=1, allow_inf_nan=False)
     ledger: str
     trial: str = Field(pattern=r"^[a-zA-Z0-9_-]+$")
     max_candidates: int = Field(default=20, ge=1, le=20)
@@ -314,8 +316,12 @@ class Plugin(Component):
             # Browser pages depend only on the targets they actually present.
             targets = self.entities[args["offset"] : args["offset"] + 12]
             decision_state = digest([self.knowledge_version(e) for e in targets])
-        elif args["operation"] in {"nominate", "remove", "submit"}:
-            decision_state = digest([self.knowledge_version(entity), w["nominations"]])
+        elif args["operation"] in {"nominate", "remove"}:
+            decision_state = digest(
+                [self.knowledge_version(entity), w["nominations"].get(entity)]
+            )
+        elif args["operation"] == "submit":
+            decision_state = digest(w["nominations"])
         else:
             decision_state = self.knowledge_version(entity)
         return ActionIdentity(
@@ -473,6 +479,13 @@ class Plugin(Component):
             owned = sorted(self.eligible_refs.get(entity, ()))
             if owned:
                 for reason in REASONS:
+                    prior = w["nominations"].get(entity)
+                    if (
+                        prior
+                        and prior["reason"] == reason
+                        and set(owned) <= set(prior["records"])
+                    ):
+                        continue
                     add(
                         "nominate",
                         f"Nominate {entity} as an independent root cause: {reason}; cite admitted inspected evidence",
@@ -735,6 +748,15 @@ class Plugin(Component):
 class BudgetedProvider(Component):
     def __init__(self, settings, context, decision_policy=None):
         self.settings = settings
+        self.coach = None
+        if settings.assessments:
+            from plugins.narrow_som import AssessmentCoach
+
+            self.coach = AssessmentCoach(
+                context.require("event_store"),
+                context.require("tool_registry"),
+                settings.noul_display_threshold,
+            )
         self.ledger = Ledger(context.base_dir / settings.ledger)
         self.provider = JevProvider(
             JevSettings.model_validate(
@@ -779,7 +801,14 @@ class BudgetedProvider(Component):
             )
         return await self.provider.check_context(request)
 
+    async def assess(self, request):
+        if request.incident_id != self.settings.trial:
+            raise ValueError("assessment outside benchmark trial scope")
+        return await self.provider.assess(request)
+
     async def decide(self, request):
+        if self.coach is not None:
+            request = await self.coach.enrich(request, self)
         if not (await self.check_context(request)).fits:
             raise ValueError("benchmark context exceeds limits")
         return await self.provider.decide(request)
@@ -807,6 +836,7 @@ def tool_plugin(settings, context):
     subsystem="decision_provider",
     component_type=BudgetedProvider,
     settings_model=ProviderSettings,
+    dependencies=("event_store", "tool_registry"),
 )
 def decision_provider(settings, context):
     if settings.escalation_policy is None:

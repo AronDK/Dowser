@@ -117,6 +117,9 @@ class SQLiteStore(Component):
             self.connection.execute(
                 "CREATE TABLE IF NOT EXISTS memory_hypotheses(incident_id TEXT NOT NULL,entity TEXT NOT NULL,sequence INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(incident_id,entity),FOREIGN KEY(incident_id,sequence) REFERENCES events(incident_id,sequence))"
             )
+            self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS som_assessments(incident_id TEXT NOT NULL,cache_key TEXT NOT NULL,sequence INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(incident_id,cache_key),FOREIGN KEY(incident_id,sequence) REFERENCES events(incident_id,sequence))"
+            )
             if version < 2:
                 for incident, sequence, kind, payload in self.connection.execute(
                     "SELECT incident_id,sequence,kind,payload FROM events ORDER BY incident_id,sequence"
@@ -157,6 +160,12 @@ class SQLiteStore(Component):
             set(hypothesis["coverage"]) | {fact.get("kind", "unknown")}
         )
         hypothesis["evidence_digest"] = fact.get("semantic_fingerprints", [])
+        hypothesis["outcomes"] = dict(
+            self.connection.execute(
+                "SELECT status,COUNT(*) FROM memory_actions WHERE incident_id=? AND json_extract(args,'$.entity')=? GROUP BY status",
+                (incident, entity),
+            )
+        )
         self.connection.execute(
             "INSERT OR REPLACE INTO memory_hypotheses VALUES(?,?,?,?)",
             (incident, entity, sequence, json.dumps(hypothesis)),
@@ -164,7 +173,27 @@ class SQLiteStore(Component):
 
     def _project(self, incident, sequence, kind, payload):
         facts = []
-        if kind == "incident_ingested":
+        if kind == "som_assessment":
+            self.connection.execute(
+                "INSERT OR REPLACE INTO som_assessments VALUES(?,?,?,?)",
+                (
+                    incident,
+                    payload["cache_key"],
+                    sequence,
+                    json.dumps(payload["result"]),
+                ),
+            )
+        elif kind == "hypothesis_assessment":
+            self.connection.execute(
+                "INSERT OR REPLACE INTO memory_hypotheses VALUES(?,?,?,?)",
+                (
+                    incident,
+                    payload["entity"],
+                    sequence,
+                    json.dumps(payload["hypothesis"]),
+                ),
+            )
+        elif kind == "incident_ingested":
             state = IncidentState.model_validate(payload["state"])
             self.connection.execute(
                 "INSERT INTO memory_scopes VALUES (?,?)", (incident, scope_key(state))
@@ -411,6 +440,26 @@ class SQLiteStore(Component):
             "historical": any(f["historical"] for f in selected)
             or any(a["historical"] for a in recent),
         }
+
+    async def observations(self, incident_id, ids):
+        """Retrieve only required admitted observations in this incident."""
+        if not ids:
+            return []
+        marks = ",".join("?" for _ in ids)
+        with self.lock:
+            rows = self.connection.execute(
+                f"SELECT j.value FROM events e JOIN json_each(CASE WHEN e.kind='incident_ingested' THEN json_extract(e.payload,'$.state.observations') ELSE json_extract(e.payload,'$.parse.observations') END) j WHERE e.incident_id=? AND e.kind IN ('incident_ingested','parse_outcome') AND json_extract(j.value,'$.id') IN ({marks}) ORDER BY e.sequence",
+                [incident_id, *ids],
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    async def assessment_cache(self, incident_id, key):
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT payload FROM som_assessments WHERE incident_id=? AND cache_key=?",
+                (incident_id, key),
+            ).fetchone()
+        return json.loads(row[0]) if row else None
 
     async def cached_reads(self, incident_id):
         """Return successful read artifacts only; changes/unknowns never replay."""

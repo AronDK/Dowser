@@ -27,7 +27,8 @@ Replace the decision-provider reference in your eight-slot configuration:
       "model": "jev-1.13.0",
       "credential_env": "TYPESAFE_API_KEY",
       "env_file": ".env",
-      "timeout_seconds": 10,
+      "decision_timeout_seconds": 30,
+      "attempt_timeout_seconds": 30,
       "max_retries": 2,
       "retry_initial_seconds": 0.5,
       "retry_max_seconds": 5
@@ -122,3 +123,21 @@ loops. Each attempt reserves the documented 64,000-token input ceiling plus
 the rate reservation. Unknown usage keeps it for the remainder of the rolling
 window. Rate waits count toward the provider deadline. The benchmark shares one
 window across all trials; financial reservations remain separate and durable.
+
+## Deadlines and assessments
+
+Generic Jev decisions default to a 30-second aggregate budget and a 30-second
+HTTP attempt limit. Benchmark decisions have no aggregate budget and remain
+bounded by the 30-minute incident watchdog. Explicit legacy `timeout_seconds`
+values alias `decision_timeout_seconds`; conflicting values are rejected. `null`
+disables the aggregate budget. Connect/read/write/pool defaults are 5/30/10/5s,
+further bounded by the attempt and remaining decision/incident time. Attempt and
+transport failures may retry; aggregate expiry, incident expiry and cancellation
+do not. Safe timing spans exclude headers, response bodies and credentials;
+unavailable server timing is unknown.
+
+`assess(AssessmentRequest)` supports typed Choice/Noul/Score questions through the
+same HTTP path, rate limiter, retries and accounting. State is bounded to 8 KiB,
+questions split into batches of at most six, and oversized individual questions
+fail before sending. Assessments return opinions with usage and timing metadata;
+execution authority remains with the harness. See [narrow assessments](itbench-aa.md#optional-narrow-assessments).

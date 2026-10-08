@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel
 
 from . import INTERFACE_VERSION
+from .assessments import AssessmentRequest, AssessmentResult
 from .models import (
     ActionCandidate,
     ContextCheck,
@@ -95,6 +96,12 @@ class DecisionCapabilityProvider(Protocol):
     """Optional additional contract for providers returning multiple decisions."""
 
     async def capabilities(self) -> DecisionCapabilities: ...
+
+
+class AssessmentProvider(Protocol):
+    """Optional narrow questions sharing the decision provider's admission and accounting."""
+
+    async def assess(self, request: AssessmentRequest) -> AssessmentResult: ...
 
 
 class DecisionPolicy(Protocol):
@@ -251,7 +258,7 @@ INTERFACES = {
 INTERFACES["tool_plugin"] = INTERFACES["tool_registry"]
 INTERFACES["decision_policy"] = {"apply": 3}
 OPTIONAL_INTERFACES = {
-    "decision_provider": {"capabilities": 0},
+    "decision_provider": {"capabilities": 0, "assess": 1},
     "tool_plugin": {"action_identity": 2, "extract_memory": 2},
     "tool_registry": {"action_identity": 2},
     "event_store": {
@@ -259,6 +266,8 @@ OPTIONAL_INTERFACES = {
         "memory": 3,
         "cached_reads": 1,
         "append_many": 2,
+        "assessment_cache": 2,
+        "observations": 2,
     },
 }
 

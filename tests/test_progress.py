@@ -492,3 +492,235 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
             from plugins.itbench_aa import working
 
             self.assertEqual(working(state)["nominations"][ENTITY]["records"], [rid])
+
+
+class CrashTests(unittest.IsolatedAsyncioTestCase):
+    async def test_crash_rolls_back_batch_and_keeps_committed_start_and_artifact(self):
+        import subprocess
+
+        from dowser.store import SQLiteStore
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "events.sqlite3"
+            store = SQLiteStore(path)
+            s = IncidentState(
+                incident_id="crash",
+                alert={},
+                desired_state={},
+                resources=[
+                    {"id": "one", "platform": "fixture", "platform_version": "1"}
+                ],
+            )
+            await store.ingest(s)
+            candidate = ActionCandidate(
+                id="action",
+                tool="fixture.read",
+                plugin_version="1",
+                args={},
+                description="Read",
+                resources=["one"],
+                verification="check",
+                effect="read_only",
+            )
+            await store.append(
+                "crash",
+                "execution_started",
+                {
+                    "execution_id": "started",
+                    "candidate": candidate.model_dump(mode="json"),
+                },
+            )
+            await store.append(
+                "crash",
+                "raw_output",
+                {"raw_output_refs": ["crash/raw"]},
+                {"crash/raw": {"observed": True}},
+            )
+            await store.aclose()
+            script = """
+import os, sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+connection.execute('PRAGMA synchronous=FULL')
+connection.execute('BEGIN IMMEDIATE')
+connection.execute("INSERT INTO events SELECT incident_id,4,schema_version,timestamp,'context_check','{}' FROM events WHERE sequence=1")
+os._exit(9)
+"""
+            result = subprocess.run(
+                [os.sys.executable, "-c", script, str(path)], check=False
+            )
+            self.assertEqual(result.returncode, 9)
+            reopened = SQLiteStore(path)
+            inspection = await reopened.inspect("crash")
+            self.assertEqual(len(inspection["events"]), 3)
+            self.assertEqual(inspection["executions"][0]["status"], "unknown")
+            self.assertEqual(inspection["artifacts"]["crash/raw"], {"observed": True})
+            with self.assertRaisesRegex(ValueError, "unknown raw output"):
+                await reopened.append(
+                    "crash", "raw_output", {"raw_output_refs": ["foreign/raw"]}
+                )
+            await reopened.aclose()
+
+
+class RepetitionReportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_model_decisions_are_reported_without_duplicate_io(self):
+        from test_itbench_aa import ENTITY, fixture
+
+        from dowser.bench import run_trial
+        from dowser.bench_data import create_index
+        from dowser.models import DecisionResult
+
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            fixture(root / "dataset" / "sre" / "Scenario-8")
+            create_index(
+                root / "dataset" / "sre" / "Scenario-8", root / "index.sqlite3", 8
+            )
+            prepared = {
+                "fingerprint": "fixture",
+                "dataset": str(root / "dataset"),
+                "indexes": {"Scenario-8": {"path": str(root / "index.sqlite3")}},
+            }
+            operations = iter(
+                ["focus", "inspect", "browse", "focus", "nominate", "submit"]
+            )
+
+            async def decide(provider, request):
+                operation = next(operations)
+                choice = next(
+                    c
+                    for c in request.candidates
+                    if c.args["operation"] == operation
+                    and (operation != "focus" or c.args["entity"] == ENTITY)
+                    and (operation != "inspect" or c.args["kind"] == "configuration")
+                    and (operation != "nominate" or c.args["reason"] == "configuration")
+                )
+                return DecisionResult(operation="select", candidate_id=choice.id)
+
+            with patch.object(JevProvider, "decide", decide):
+                row = await run_trial(
+                    root / "campaign", prepared, 8, "repeats", 42, "pilot", root
+                )
+            self.assertEqual(row["category"], "completed")
+            self.assertEqual(row["repeated_external_reads"], 0)
+            self.assertGreater(row["repeated_decisions"], 0)
+            self.assertEqual(row["unchanged_repeated_decisions"], 0)
+            self.assertEqual(row["semantic_novelty"], 1)
+
+
+class RequiredEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bounded_loop_restores_candidate_required_evidence_before_validation(
+        self,
+    ):
+        from types import SimpleNamespace
+
+        from dowser.core import (
+            ContextSettings,
+            DefaultContextBuilder,
+            DefaultPolicy,
+            PolicySettings,
+        )
+        from dowser.loop import DefaultIncidentLoop, LoopSettings
+        from dowser.models import (
+            ContextCheck,
+            DecisionResult,
+            Observation,
+            ParseResult,
+            TransportResult,
+            ValidationResult,
+            VerificationResult,
+        )
+        from dowser.store import SQLiteStore
+
+        with tempfile.TemporaryDirectory() as root:
+            store = SQLiteStore(Path(root) / "events.sqlite3")
+            self.addAsyncCleanup(store.aclose)
+            old = Observation(
+                resource_id="one", kind="probe", payload={"earlier": True}
+            )
+            latest = Observation(
+                resource_id="one", kind="probe", payload={"latest": True}
+            )
+            state = IncidentState(
+                incident_id="required",
+                alert={},
+                desired_state={},
+                resources=[
+                    {"id": "one", "platform": "fixture", "platform_version": "1"}
+                ],
+                observations=[old, latest],
+            )
+            candidate = ActionCandidate(
+                id="read",
+                tool="fixture.read",
+                plugin_version="1",
+                args={},
+                description="Read",
+                resources=["one"],
+                verification="check",
+                effect="read_only",
+                required_observation_ids=[old.id],
+            )
+
+            async def candidates(state):
+                self.assertNotIn(old.id, [o.id for o in state.observations])
+                return [candidate]
+
+            async def validate(candidate, state):
+                self.assertIn(old.id, [o.id for o in state.observations])
+                return ValidationResult(allowed=True)
+
+            async def execute(candidate, state):
+                self.assertIn(old.id, [o.id for o in state.observations])
+                return TransportResult(
+                    status="succeeded", raw_output={"observed": True}
+                )
+
+            async def parse(candidate, result):
+                return ParseResult(
+                    status="valid",
+                    parser_version="fixture",
+                    observations=[
+                        Observation(
+                            resource_id="one", kind="probe", payload={"confirmed": True}
+                        )
+                    ],
+                )
+
+            async def verify(state, candidate, result):
+                self.assertIn(old.id, [o.id for o in state.observations])
+                return VerificationResult(
+                    status="passed",
+                    reason="confirmed",
+                    evidence_refs=[result.parse.observations[0].id],
+                )
+
+            async def check_context(request):
+                self.assertIn(old.id, [o.id for o in request.state.observations])
+                return ContextCheck(fits=True)
+
+            async def decide(request):
+                return DecisionResult(operation="select", candidate_id=candidate.id)
+
+            registry = SimpleNamespace(
+                candidates=candidates, validate=validate, execute=execute, parse=parse
+            )
+            services = {
+                "event_store": store,
+                "tool_registry": registry,
+                "context_builder": DefaultContextBuilder(ContextSettings(), store),
+                "decision_provider": SimpleNamespace(
+                    check_context=check_context, decide=decide
+                ),
+                "executor": registry,
+                "verifier": SimpleNamespace(verify=verify),
+            }
+            context = AppContext(services, Limits(), Path(root))
+            services["validation_policy"] = DefaultPolicy(PolicySettings(), context)
+            result = await DefaultIncidentLoop(
+                context,
+                LoopSettings(
+                    bounded_runtime_view=True, batch_diagnostics=True, profile=True
+                ),
+            ).run(state)
+            self.assertEqual(result.outcome, "resolved")
+            self.assertEqual(await store.observations("other", [old.id]), [])

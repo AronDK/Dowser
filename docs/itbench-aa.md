@@ -13,16 +13,16 @@ also uses 19 private cases, shell access, and a normalization model. Cite
 ```sh
 uv sync --locked --extra jev --extra itbench-aa
 uv run dowser-bench download
-uv run dowser-bench prepare
+uv run dowser-bench prepare --source-indexes .local/itbench-aa/indexes
 uv run dowser-bench run --campaign my-campaign
-uv run dowser-bench report .local/itbench-aa/my-campaign
+uv run dowser-bench report .local/itbench-aa-prepared-v2/my-campaign
 ```
 
 Downloads use four workers, no Hugging Face authentication, resumable Hub
 downloads, and revision `76df38a82288f75ba9e41dc8c515033332497473`. Originals live
 at `~/Projects/ITBench-AA`. Preparation requires the complete remote file list,
 validates all 40 ground-truth schemas, hashes every file, makes originals read-only,
-and builds separate streaming SQLite indexes. It never modifies source content.
+and builds version-2 SQLite indexes in `.local/itbench-aa-prepared-v2/`. Existing indexes are never overwritten. Omit `--source-indexes` when preparing from raw snapshots for the first time; it otherwise copies matching sanitized records from the old indexes and rebuilds ownership. Source indexes and pinned source content remain unchanged.
 The `itbench-aa` extra supplies Hugging Face Hub and PyYAML; the `jev` extra supplies
 HTTP and `.env` support. The private key stays in the existing `.env` or
 `TYPESAFE_API_KEY`, as described in [Jev setup](jev.md).
@@ -33,31 +33,29 @@ are `plugins.itbench_aa:normalizer`, `:tool_plugin`, and `:decision_provider`.
 Normalizers and tools share a trusted scenario/index/trial configuration; the
 decision provider wraps the existing Jev adapter and advertises one decision per
 round. The default context builder includes only the latest investigation
-observation and zero prior execution outcomes. Complete history remains durable.
+observation and four recent execution outcomes. The benchmark opts into a live runtime view with latest required observations, candidate-required evidence and at most eight full outcomes. Complete history remains durable.
 
 The ten pilot cases run in order: 8, 2, 19, 17, 16, 9, 7, 6, 31, 102. If technical
 checks pass, all 40 cases run in numeric order three times with seeds 42, 43, 44.
 Pilot correctness does not gate the full run. Unrecovered provider, parsing, submission,
 context, or runtime failures stop progression. HTTP 408/429/5xx and transport failures allow two
-exponential-backoff retries within the provider deadline. `--phase pilot` runs only the pilot;
+exponential-backoff retries within any aggregate or incident deadline. `--phase pilot` runs only the pilot;
 `--phase full` requires an existing technically completed pilot.
 
 ## Investigation and submission
 
-Entity pages contain twelve identities observed in snapshots. Application and
-chaos namespaces precede system entities; every entity remains reachable.
+Entity pages contain twelve identities observed in snapshots. Causal public-alert targets and their observed owner/dependency neighborhood appear first, followed by application and chaos namespaces. Watchdog and InfoInhibitor retain evidence but do not seed the causal shortlist. Every entity remains reachable.
 Candidates contain only code-supplied, strict arguments. The model can focus,
 inspect configuration/history, relationships, events, logs, traces or metrics,
 page evidence, nominate or remove a factor, and submit. A nomination uses one of
-six reason categories and must cite an inspected record owned by the entity.
+six reason categories and must cite admitted, inspected evidence owned by the entity. Earlier eligible evidence remains available after navigation. Execution revalidates both admission and ownership.
 Submission writes only the configured trial diagnosis artifact and uses the
 incident's single permitted change. Investigation steps produce observations.
 Current scope, action arguments, and investigation revision are revalidated before
 execution. Paths reject traversal and symlinks, including ancestor symlinks.
 
 Evidence pages are capped at 4 KiB. Large records use explicit UTF-8 segments;
-configuration history also offers a fixed projection of identity, revision,
-configuration and status. The single current investigation payload is capped at
+configuration and history project matching primary objects with environment variables, images, resources, configuration data and status. Event evidence belongs to its `regarding` or `involvedObject` target. Associated records are explicitly labelled as related; they cannot authorize nomination. Unchanged and empty revisions collapse with counts and provenance, administrative fields are omitted, and full sanitized records remain accessible through raw inspection. The single current investigation payload is capped at
 8 KiB. Required state overflow terminates instead of dropping evidence. The
 provider checks its complete request against a conservative byte budget.
 Ground truth, `data.jsonl`, recommended actions, and grader outputs are outside
@@ -87,7 +85,7 @@ methodological differences. Identical repeated group definitions are merged.
 ## Accounting, artifacts, and resume
 
 Defaults are pinned `jev-1.13.0`, no call-count ceiling, a 30-minute incident
-watchdog, a 15-second tool timeout, a 10-second provider timeout, one identical
+watchdog, a 15-second tool timeout, a 30-second HTTP attempt limit, no aggregate decision timeout, one identical
 semantic action per unchanged decision state, and 600-second observation freshness.
 SQLite provides [cumulative memory and recall](memory.md). There is no fallback model.
 Model-selected escalation is disabled by default. Optional
@@ -95,7 +93,7 @@ Model-selected escalation is disabled by default. Optional
 enabled flag and penalty are part of the frozen campaign configuration.
 HTTP 408/429/5xx and transport failures permit at most two
 retries with exponential backoff, jitter and `Retry-After`/`Retry-After-ms` handling; the provider
-deadline covers all attempts and delays. Invalid responses are not retried.
+incident deadline covers all attempts and delays. HTTP defaults are connect 5s, read 30s, write 10s and pool 5s, bounded further by the attempt limit and any remaining aggregate/incident time. Attempt timeouts may retry; aggregate expiry, incident expiry and user cancellation do not. Invalid responses are not retried.
 A transactional ledger reserves the full documented
 64,000-token ceiling before each call. Known usage reconciles the reservation;
 unknown usage retains it conservatively. A rejected decision with valid usage
@@ -108,14 +106,14 @@ Pricing is verified
 and its source saved when creating the campaign; price changes require updating
 accounting before running. Output tokens are currently free.
 
-Artifacts live in `.local/itbench-aa/<campaign>/`: a frozen reproducibility manifest,
+New artifacts live in `.local/itbench-aa-prepared-v2/<campaign>/`; preserved campaigns remain under `.local/itbench-aa/`. Artifacts include a frozen reproducibility manifest,
 pricing source, SQLite history and spending ledger, diagnoses, post-trial scoring,
 trial records, JSONL/CSV exports, `diagnostics.jsonl`, and `summary.md`. Failure
 details persist in the ledger and incident history and are printed as JSON to
 stderr, including response-validation reason codes and safe numeric details.
 Pilot results remain separate.
 Reports include score, exact-root-set accuracy, failure categories, calls, token
-usage, accounted cost, unknown reservations, model latency, and trial duration.
+usage, accounted cost, unknown reservations, model latency and trial duration. Duplicate external reads, repeated model decisions, unchanged repeated decisions, navigation revisits, semantic novelty and omitted facts are separate metrics. Safe timing spans record admission, connection, sending, response waiting, processing, backoff and harness phases. Unavailable server timing remains unknown.
 
 Rerun the same campaign command to skip completed trials with matching dataset,
 configuration, code, lock, and Python fingerprints. An interrupted trial is
@@ -182,3 +180,21 @@ The runner requires all other code hashes
 and all per-trial execution/configuration code to match the archived initial
 source, records a separate runner source revision in the manifest, and preserves
 the initial code fingerprints and all completed trial records.
+
+## Optional narrow assessments
+
+`--assessments` enables separate relevance, evidence-sufficiency, support and
+refutation questions. Generic providers may implement optional `assess(request)`
+with typed Choice, Noul and Score questions. Assessment state is limited to 8 KiB;
+batches contain at most six questions and split further to fit the provider's
+request ceiling. Each HTTP attempt uses the same retry, rate and billing admission
+as a decision. Cache keys include the public-alert digest, entity, semantic
+knowledge digest and question version, and SQLite retains results and hypotheses.
+The Noul display threshold defaults to 0.5; uncertainty and contradictory support
+and refutation remain visible. These opinions rank presentation and populate
+hypotheses. They do not fabricate observations, remove alternatives, grant
+permissions, force submission or nominate entities.
+
+Paid validation and a fresh ten-case pilot require separate authorization. The
+preserved 20% (2/10) baseline is `.local/itbench-aa/jev-noesc-20261008/`. Offline
+verification cannot establish an accuracy improvement.

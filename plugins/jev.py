@@ -23,6 +23,13 @@ from pydantic import (
     model_validator,
 )
 
+from dowser.assessments import (
+    AssessmentRequest,
+    AssessmentResult,
+    ChoiceAssessment,
+    NoulAssessment,
+    ScoreAssessment,
+)
 from dowser.config import FactoryReference, load_factory
 from dowser.contracts import Component, factory
 from dowser.diagnostics import DiagnosticError, failure_details
@@ -498,7 +505,189 @@ class JevProvider(Component):
         return max(0, delay)
 
     async def decide(self, request):
-        payload, labels = self.prepare(request)
+        deadline = (
+            time.monotonic() + self.settings.decision_timeout_seconds
+            if self.settings.decision_timeout_seconds is not None
+            else None
+        )
+        try:
+            async with asyncio.timeout_at(deadline):
+                payload, labels = self.prepare(request)
+                result = await self._request(
+                    request,
+                    payload,
+                    lambda value: self.normalize(
+                        value, labels, payload["questions"]["next_action"]["criteria"]
+                    ),
+                    decision_deadline=deadline,
+                )
+                return await self.apply_policy(request, result, labels)
+        except TimeoutError:
+            raise JevError(
+                "Aggregate decision deadline exhausted",
+                code="provider_deadline",
+                category="timeout",
+                stage="decision",
+                timeout_kind="aggregate",
+            ) from None
+
+    def normalize_assessment(self, value, request):
+        try:
+            if value["model"] != self.settings.model and self.settings.model not in {
+                "jev-latest",
+                "jev-preview",
+            }:
+                raise ValueError
+            if not str(value["model"]).startswith("jev-") or set(
+                value["answers"]
+            ) != set(request.questions):
+                raise ValueError
+            usage = Usage.model_validate(
+                {k: value["usage"][k] for k in Usage.model_fields}
+            )
+            answers = {}
+            for name, question in request.questions.items():
+                answer_model = {
+                    "choice": ChoiceAssessment,
+                    "noul": NoulAssessment,
+                    "score": ScoreAssessment,
+                }[question.type]
+                answer = answer_model.model_validate(
+                    value["answers"][name], strict=True
+                )
+                if question.type != "noul":
+                    keys = (
+                        set(question.criteria)
+                        if question.type == "choice"
+                        else {str(i) for i in range(len(question.criteria))}
+                    )
+                    if set(answer.probabilities) != keys or any(
+                        not math.isfinite(p) or not 0 <= p <= 1
+                        for p in answer.probabilities.values()
+                    ):
+                        raise ValueError
+                    if not math.isclose(
+                        sum(answer.probabilities.values()),
+                        1,
+                        abs_tol=self.settings.probability_sum_tolerance,
+                    ):
+                        raise ValueError
+                    if question.type == "choice":
+                        if answer.choice not in keys:
+                            raise ValueError
+                    elif (
+                        answer.legend
+                        != {str(i): v for i, v in enumerate(question.criteria)}
+                        or answer.score > len(keys) - 1
+                    ):
+                        raise ValueError
+                    if question.type == "score":
+                        expected = sum(
+                            int(k) * p for k, p in answer.probabilities.items()
+                        ) / sum(answer.probabilities.values())
+                        if not math.isclose(
+                            answer.score,
+                            expected,
+                            abs_tol=self.settings.probability_sum_tolerance,
+                        ):
+                            raise ValueError
+                answers[name] = answer
+            return AssessmentResult(
+                answers=answers,
+                score_metadata={
+                    "provider": "typesafe",
+                    "model": value["model"],
+                    "usage": usage.model_dump(),
+                    "response_adjustments": [],
+                },
+            )
+        except (ValueError, KeyError, TypeError):
+            raise JevError(
+                "Jev returned an invalid assessment",
+                code="assessment_schema",
+                category="response",
+                stage="validation",
+            ) from None
+
+    async def assess(self, request):
+        request = AssessmentRequest.model_validate(request)
+        reject_credentials(request.model_dump(mode="json"))
+        if (
+            len(
+                json.dumps(
+                    request.state, ensure_ascii=False, separators=(",", ":")
+                ).encode()
+            )
+            > 8192
+        ):
+            raise JevError(
+                "Assessment state exceeds 8 KiB",
+                code="assessment_state_budget",
+                category="configuration",
+                stage="preparation",
+            )
+        batches, batch = [], {}
+        for name, question in request.questions.items():
+            trial = {**batch, name: question}
+            payload = {
+                "model": self.settings.model,
+                "state": request.state,
+                "questions": {
+                    n: q.model_dump(exclude_none=True) for n, q in trial.items()
+                },
+            }
+            if len(trial) > 6 or not self.context_check(payload).fits:
+                if not batch:
+                    raise JevError(
+                        "Assessment question exceeds request ceiling",
+                        code="context_budget",
+                        category="configuration",
+                        stage="preparation",
+                    )
+                batches.append(batch)
+                batch = {name: question}
+                single = {
+                    **payload,
+                    "questions": {name: question.model_dump(exclude_none=True)},
+                }
+                if not self.context_check(single).fits:
+                    raise JevError(
+                        "Assessment question exceeds request ceiling",
+                        code="context_budget",
+                        category="configuration",
+                        stage="preparation",
+                    )
+            else:
+                batch = trial
+        if batch:
+            batches.append(batch)
+        answers, metadata = {}, []
+        # One aggregate budget covers all batches; every HTTP attempt shares rate and billing admission.
+        aggregate = (
+            time.monotonic() + self.settings.decision_timeout_seconds
+            if self.settings.decision_timeout_seconds is not None
+            else None
+        )
+        for questions in batches:
+            part = request.model_copy(update={"questions": questions})
+            payload = {
+                "model": self.settings.model,
+                "state": request.state,
+                "questions": {
+                    n: q.model_dump(exclude_none=True) for n, q in questions.items()
+                },
+            }
+            result = await self._request(
+                part,
+                payload,
+                lambda value: self.normalize_assessment(value, part),
+                decision_deadline=aggregate,
+            )
+            answers.update(result.answers)
+            metadata.append(result.score_metadata)
+        return AssessmentResult(answers=answers, score_metadata={"batches": metadata})
+
+    async def _request(self, request, payload, normalize, decision_deadline=None):
         if not self.context_check(payload).fits:
             raise JevError(
                 "Jev request exceeds the conservative context budget",
@@ -516,7 +705,7 @@ class JevProvider(Component):
             )
         httpx = optional_dependency("httpx")
         started = time.monotonic()
-        aggregate_deadline = (
+        aggregate_deadline = decision_deadline or (
             started + self.settings.decision_timeout_seconds
             if self.settings.decision_timeout_seconds is not None
             else None
@@ -662,11 +851,7 @@ class JevProvider(Component):
                     except (ValueError, KeyError, TypeError):
                         pass
                     try:
-                        result = self.normalize(
-                            value,
-                            labels,
-                            payload["questions"]["next_action"]["criteria"],
-                        )
+                        result = normalize(value)
                     except JevError as error:
                         error.detail.http_status = 200
                         error.detail.provider_request_id = provider_id
@@ -690,10 +875,10 @@ class JevProvider(Component):
                             "Jev request failed",
                             code="incident_expired"
                             if incident_expired
-                            else "request_cancelled"
-                            if isinstance(error, asyncio.CancelledError)
                             else "provider_deadline"
                             if aggregate_expired
+                            else "request_cancelled"
+                            if isinstance(error, asyncio.CancelledError)
                             else "attempt_timeout"
                             if attempt_expired
                             else "transport_error",
@@ -848,48 +1033,40 @@ class JevProvider(Component):
                         retry_failures=failures,
                         timing_spans=spans,
                     )
-                    alternatives = {
-                        label: DecisionResult(
-                            operation="select", candidate_id=candidate_id
-                        )
-                        for label, candidate_id in labels.items()
-                    }
-                    alternatives["wait"] = DecisionResult(
-                        operation="wait", wait_seconds=self.settings.wait_seconds
-                    )
-                    try:
-                        adjusted = DecisionResult.model_validate(
-                            await self.decision_policy.apply(
-                                request.model_copy(deep=True),
-                                result.model_copy(deep=True),
-                                alternatives,
-                            )
-                        )
-                        if (
-                            adjusted.operation == "escalate"
-                            and not self.allow_escalation
-                        ):
-                            raise ValueError(
-                                "decision policy returned disabled escalation"
-                            )
-                        if (
-                            adjusted.operation == "select"
-                            and adjusted.candidate_id not in labels.values()
-                        ):
-                            raise ValueError(
-                                "decision policy returned unknown candidate"
-                            )
-                    except Exception:
-                        raise JevError(
-                            "decision policy failed",
-                            code="decision_policy_failed",
-                            category="configuration",
-                            stage="decision",
-                        ) from None
-                    adjusted.score_metadata["native_decision"] = result.model_dump(
-                        mode="json"
-                    )
-                    return adjusted
+                    return result
+
+    async def apply_policy(self, request, result, labels):
+        alternatives = {
+            label: DecisionResult(operation="select", candidate_id=candidate_id)
+            for label, candidate_id in labels.items()
+        }
+        alternatives["wait"] = DecisionResult(
+            operation="wait", wait_seconds=self.settings.wait_seconds
+        )
+        try:
+            adjusted = DecisionResult.model_validate(
+                await self.decision_policy.apply(
+                    request.model_copy(deep=True),
+                    result.model_copy(deep=True),
+                    alternatives,
+                )
+            )
+            if adjusted.operation == "escalate" and not self.allow_escalation:
+                raise ValueError("decision policy returned disabled escalation")
+            if (
+                adjusted.operation == "select"
+                and adjusted.candidate_id not in labels.values()
+            ):
+                raise ValueError("decision policy returned unknown candidate")
+        except Exception:
+            raise JevError(
+                "decision policy failed",
+                code="decision_policy_failed",
+                category="configuration",
+                stage="decision",
+            ) from None
+        adjusted.score_metadata["native_decision"] = result.model_dump(mode="json")
+        return adjusted
 
     async def aclose(self):
         await self.decision_policy.aclose()
