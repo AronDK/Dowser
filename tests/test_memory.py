@@ -300,9 +300,9 @@ class RecallTests(unittest.IsolatedAsyncioTestCase):
                     requests.append(request.model_copy(deep=True))
                     op = sequence[len(requests) - 1]
                     if op == "escalate":
-                        self.assertFalse(
+                        self.assertTrue(
                             any(
-                                c.args["operation"] == "recall"
+                                c.args.get("operation") == "recall"
                                 and c.args["kind"] == "configuration"
                                 for c in request.candidates
                             )
@@ -313,11 +313,14 @@ class RecallTests(unittest.IsolatedAsyncioTestCase):
                     choice = next(
                         c
                         for c in request.candidates
-                        if c.args["operation"] == op
+                        if c.args.get("operation") == op
                         and (op != "focus" or c.args["entity"] == ENTITY)
                         and (
                             op not in {"inspect", "recall"}
-                            or c.args["kind"] == "configuration"
+                            or (
+                                c.args["kind"] == "configuration"
+                                and c.args["entity"] == ENTITY
+                            )
                         )
                         and (op != "nominate" or c.args["reason"] == "configuration")
                     )
@@ -361,7 +364,7 @@ class RecallTests(unittest.IsolatedAsyncioTestCase):
                             )
                         else:
                             events = await app.services["event_store"].history("loop")
-                            self.assertTrue(
+                            self.assertFalse(
                                 any(
                                     e.kind == "validation_outcome"
                                     and "identical action"
@@ -404,13 +407,13 @@ class RecallTests(unittest.IsolatedAsyncioTestCase):
             focus = next(
                 c
                 for c in await plugin.candidates(s)
-                if c.args["operation"] == "focus" and c.args["entity"] == ENTITY
+                if c.args.get("operation") == "focus" and c.args["entity"] == ENTITY
             )
             await execute(focus)
             read = next(
                 c
                 for c in await plugin.candidates(s)
-                if c.args["operation"] == "inspect"
+                if c.args.get("operation") == "inspect"
                 and c.args["kind"] == "configuration"
             )
             ident = await plugin.action_identity(read, s)
@@ -423,7 +426,8 @@ class RecallTests(unittest.IsolatedAsyncioTestCase):
             recall = next(
                 c
                 for c in await plugin.candidates(s)
-                if c.args["operation"] == "recall" and c.args["kind"] == "configuration"
+                if c.args.get("operation") == "recall"
+                and c.args["kind"] == "configuration"
             )
             with patch.object(
                 plugin.index,

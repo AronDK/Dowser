@@ -589,7 +589,8 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("ground_truth", encoded)
         self.assertTrue(
             all(
-                len(p["questions"]["next_action"]["criteria"]) <= 20 for p in self.calls
+                len(p["questions"]["next_action"]["criteria"]) <= 255
+                for p in self.calls
             )
         )
 

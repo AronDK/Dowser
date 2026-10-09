@@ -6,6 +6,8 @@ import threading
 from pathlib import Path
 
 from .contracts import AppContext, Component, factory
+from .history import HistoryProjection
+from .journal import AuditJournal
 from .memory import action_identity, compact, facts_from_parse, scope_key
 from .models import ActionCandidate, Boundary, Event, IncidentState, ParseResult, now
 
@@ -16,6 +18,7 @@ class ExistingIncidentError(ValueError):
 
 class StoreSettings(Boundary):
     path: str = ".local/history.sqlite3"
+    journal: str | None = None
 
 
 def reject_credentials(value):
@@ -44,13 +47,15 @@ def reject_credentials(value):
             reject_credentials(child)
 
 
-class SQLiteStore(Component):
-    def __init__(self, path: Path):
+class SQLiteStore(HistoryProjection, AuditJournal, Component):
+    def __init__(self, path: Path, journal: Path | None = None):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.connection = sqlite3.connect(path, check_same_thread=False)
         try:
             self._initialize()
+            self.initialize_history()
+            self.initialize_journal(journal)
         except BaseException:
             self.connection.close()
             raise
@@ -314,6 +319,10 @@ class SQLiteStore(Component):
                 (ref, incident_id, sequence, json.dumps(artifact)),
             )
         self._project(incident_id, sequence, kind, payload)
+        self.project_history(
+            incident_id, sequence, kind, payload, event.timestamp.isoformat()
+        )
+        self.journal_enqueue(incident_id, sequence)
         return event
 
     async def action_count(self, incident_id, identity):
@@ -354,7 +363,7 @@ class SQLiteStore(Component):
                 }
             marks = ",".join("?" for _ in incidents)
             rows = self.connection.execute(
-                f"SELECT incident_id,sequence,fact_key,resource_id,payload,refs,status FROM memory_facts WHERE incident_id IN ({marks}) ORDER BY rowid DESC",
+                f"SELECT f.incident_id,f.sequence,f.fact_key,f.resource_id,f.payload,f.refs,f.status,h.payload FROM memory_facts f LEFT JOIN history_entries h ON h.incident_id=f.incident_id AND h.sequence=f.sequence AND h.category='fact' AND json_extract(h.payload,'$.item')=f.item WHERE f.incident_id IN ({marks}) ORDER BY f.rowid DESC",
                 incidents,
             ).fetchall()
             hypotheses_rows = self.connection.execute(
@@ -365,25 +374,52 @@ class SQLiteStore(Component):
                 f"SELECT incident_id,sequence,identity,tool,args,status,parse_status,detail FROM memory_actions WHERE incident_id IN ({marks}) ORDER BY rowid DESC",
                 incidents,
             ).fetchall()
-        relevant = {c.args.get("entity") for c in candidates if c.args.get("entity")}
+        relevant = {
+            o.payload.get("focus") for o in state.observations if o.payload.get("focus")
+        }
+        relevant.update(
+            str(state.alert[k])
+            for k in ("device_id", "resource_id")
+            if state.alert.get(k)
+        )
+        for alert in state.alert.get("public_alerts", []):
+            relevant.update(alert.get("entities", []))
+            if alert.get("namespace") and alert.get("service"):
+                relevant.add(f"{alert['namespace']}/Service/{alert['service']}")
+        if not relevant:
+            relevant = {
+                c.args.get("entity") for c in candidates if c.args.get("entity")
+            }
         # Related focus first, followed by recent cumulative findings. Conflicts
         # retain both values, rather than silently treating the latest as truth.
-        latest, conflicts, facts = {}, set(), []
-        for incident, seq, key, resource, payload, refs, status in rows:
+        latest, conflicts, facts, seen_values = {}, set(), [], set()
+        for incident, seq, key, resource, payload, refs, status, projection in rows:
             value = json.loads(payload)
+            provenance = json.loads(projection) if projection else {}
+            pinned = provenance.get("immutable_snapshot") and provenance[
+                "immutable_snapshot"
+            ] == state.payload.get("index_fingerprint")
+            signature = (resource, key, payload, status)
+            if signature in seen_values:
+                continue
+            seen_values.add(signature)
             fact = {
                 "key": key,
                 "resource_id": resource,
-                "payload": compact(value),
+                "payload": value if limit is None else compact(value),
                 "evidence_refs": json.loads(refs),
                 "event_ref": f"{incident}:{seq}",
                 "historical": incident != state.incident_id,
                 "freshness": "revalidation_required"
                 if incident != state.incident_id
-                else "current_incident",
+                else "pinned_snapshot"
+                if pinned
+                else "live_original_timestamp",
+                "observed_at": provenance.get("observed_at"),
+                "evidence_version": provenance.get("immutable_snapshot"),
                 "status": status,
             }
-            prior = latest.get(key)
+            prior = latest.get((resource, key))
             if prior is not None:
                 if prior["value"] != value:
                     conflicts.add(key)
@@ -391,7 +427,7 @@ class SQLiteStore(Component):
                     prior["fact"]["status"] = "contradicted"
                     facts.append(fact)
                 continue
-            latest[key] = {"value": value, "fact": fact}
+            latest[(resource, key)] = {"value": value, "fact": fact}
             facts.append(fact)
         facts.sort(
             key=lambda f: (
@@ -400,7 +436,7 @@ class SQLiteStore(Component):
             ),
             reverse=True,
         )
-        selected = facts[:limit]
+        selected = facts if limit is None else facts[:limit]
         recent = [
             {
                 "event_ref": f"{incident}:{seq}",
@@ -412,10 +448,16 @@ class SQLiteStore(Component):
                 "detail": compact(json.loads(detail), 350),
                 "historical": incident != state.incident_id,
             }
-            for incident, seq, ident, tool, args, status, parsed, detail in actions[:8]
+            for incident, seq, ident, tool, args, status, parsed, detail in (
+                actions if limit is None else actions[:8]
+            )
         ]
         hypotheses = [
-            {**json.loads(payload), "historical": incident != state.incident_id}
+            {
+                **json.loads(payload),
+                "historical": incident != state.incident_id,
+                "interpretation": True,
+            }
             for incident, payload in hypotheses_rows
         ]
         hypotheses.sort(key=lambda h: h["entity"] in relevant, reverse=True)
@@ -482,16 +524,22 @@ class SQLiteStore(Component):
                 raise ExistingIncidentError(
                     "incident ID already exists; automatic resumption is disabled"
                 ) from exc
-            return self._append(
+            event = self._append(
                 state.incident_id,
                 "incident_ingested",
                 {"state": state.model_dump(mode="json")},
             )
+        with self.lock:
+            self.flush_journal()
+        return event
 
     async def append(self, incident_id, kind, payload, artifacts=None):
         with self.lock, self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
-            return self._append(incident_id, kind, payload, artifacts)
+            event = self._append(incident_id, kind, payload, artifacts)
+        with self.lock:
+            self.flush_journal()
+        return event
 
     async def append_many(self, incident_id, events):
         allowed = {
@@ -506,9 +554,12 @@ class SQLiteStore(Component):
             raise ValueError("batch contains an effect or evidence admission boundary")
         with self.lock, self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
-            return [
+            result = [
                 self._append(incident_id, kind, payload) for kind, payload in events
             ]
+        with self.lock:
+            self.flush_journal()
+        return result
 
     async def history(self, incident_id):
         with self.lock:
@@ -587,6 +638,13 @@ class SQLiteStore(Component):
             "events": [e.model_dump(mode="json") for e in events],
             "executions": executions,
             "artifacts": artifacts,
+            "journal_error": self.journal_error,
+            "mirror_failures": [
+                json.loads(row[0])
+                for row in self.connection.execute(
+                    "SELECT error FROM audit_mirror_state WHERE error IS NOT NULL"
+                )
+            ],
         }
 
     async def aclose(self):
@@ -598,4 +656,7 @@ class SQLiteStore(Component):
     subsystem="event_store", component_type=SQLiteStore, settings_model=StoreSettings
 )
 def sqlite_store(settings: StoreSettings, context: AppContext):
-    return SQLiteStore(context.base_dir / settings.path)
+    return SQLiteStore(
+        context.base_dir / settings.path,
+        context.base_dir / settings.journal if settings.journal else None,
+    )

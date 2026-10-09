@@ -434,7 +434,7 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
             focus = next(
                 c
                 for c in await plugin.candidates(state)
-                if c.args["operation"] == "focus" and c.args["entity"] == ENTITY
+                if c.args.get("operation") == "focus" and c.args["entity"] == ENTITY
             )
             initial = await plugin.action_identity(focus, state)
             plugin.read_cache["unrelated"] = {"records": [], "next": None}
@@ -482,9 +482,15 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
                 choice = next(
                     c
                     for c in choices
-                    if c.args["operation"] == op
+                    if c.args.get("operation") == op
                     and (op != "focus" or c.args["entity"] == ENTITY)
-                    and (op != "inspect" or c.args["kind"] == "configuration")
+                    and (
+                        op != "inspect"
+                        or (
+                            c.args["kind"] == "configuration"
+                            and c.args["entity"] == ENTITY
+                        )
+                    )
                     and (op != "nominate" or c.args["reason"] == "configuration")
                 )
                 parsed = await plugin.parse(choice, await plugin.execute(choice, state))
@@ -589,9 +595,15 @@ class RepetitionReportTests(unittest.IsolatedAsyncioTestCase):
                 choice = next(
                     c
                     for c in request.candidates
-                    if c.args["operation"] == operation
+                    if c.args.get("operation") == operation
                     and (operation != "focus" or c.args["entity"] == ENTITY)
-                    and (operation != "inspect" or c.args["kind"] == "configuration")
+                    and (
+                        operation != "inspect"
+                        or (
+                            c.args["kind"] == "configuration"
+                            and c.args["entity"] == ENTITY
+                        )
+                    )
                     and (operation != "nominate" or c.args["reason"] == "configuration")
                 )
                 return DecisionResult(operation="select", candidate_id=choice.id)

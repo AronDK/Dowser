@@ -20,10 +20,16 @@ from .config import (
 from .diagnostics import failure_details
 from .intake import IntakeRunner
 from .models import normalize_incident
-from .store import reject_credentials
+from .store import SQLiteStore, reject_credentials
 
 
 async def dispatch(args):
+    if args.command == "journal-repair":
+        store = SQLiteStore(args.database)
+        try:
+            return store.repair_journal(args.output)
+        finally:
+            await store.aclose()
     config = read_config(args.config)
     _, order = validate_config(config)
     if args.command == "validate":
@@ -77,6 +83,12 @@ async def cancellable_dispatch(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="dowser")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    repair = subparsers.add_parser(
+        "journal-repair",
+        help="Export or repair the SQLite audit mirror without replaying tools",
+    )
+    repair.add_argument("--database", type=Path, required=True)
+    repair.add_argument("--output", type=Path, required=True)
     for command in ("validate", "run", "inspect", "serve"):
         sub = subparsers.add_parser(command)
         sub.add_argument("--config", type=Path, required=True)

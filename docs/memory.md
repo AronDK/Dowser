@@ -1,3 +1,10 @@
+# Current behavior
+
+Authorized actions execute again when selected again. Historical repetition vetoes
+are deprecated. The large profile retains all admitted facts when they fit and
+provides indexed history retrieval. See [Decisions and history](openai-decisions.md).
+The bounded profile and earlier design details below remain for adapter compatibility.
+
 # Cumulative investigation memory
 
 SQLite stores original evidence and events, plus rebuildable indexed projections

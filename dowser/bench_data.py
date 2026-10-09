@@ -591,6 +591,22 @@ class EvidenceIndex:
                 )
             )
 
+    def available_kinds(self):
+        """Snapshot catalogue metadata, without loading or admitting record contents."""
+        if self.meta["version"] == 1:
+            return None  # Legacy ownership still requires record-level filtering.
+        result = {}
+        with self.connect() as db:
+            for entity, kind in db.execute(
+                "SELECT DISTINCT e.entity,r.kind FROM record_owners e JOIN records r ON r.id=e.record_id"
+            ):
+                result.setdefault((entity, False), set()).add(kind)
+            for entity, kind in db.execute(
+                "SELECT DISTINCT e.entity,r.kind FROM record_entities e JOIN records r ON r.id=e.record_id WHERE NOT EXISTS (SELECT 1 FROM record_owners o WHERE o.entity=e.entity AND o.record_id=e.record_id)"
+            ):
+                result.setdefault((entity, True), set()).add(kind)
+        return result
+
     @lru_cache(maxsize=256)
     def refs(self, entity, kind, related=False):
         with self.connect() as db:

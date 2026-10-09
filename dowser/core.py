@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel, Field
 
+from .catalogue import encode_catalogue
 from .config import FactoryReference, check_component, load_factory
 from .contracts import Component, ToolSpec, factory
 from .memory import action_identity
@@ -19,6 +20,7 @@ from .models import (
 )
 from .runtime import bounded_call
 from .store import reject_credentials
+from .tokens import estimate
 
 
 class EmptySettings(Boundary):
@@ -205,6 +207,9 @@ async def tool_registry(settings, context):
 class ContextSettings(Boundary):
     recent_outcomes: int = Field(default=4, ge=0)
     memory_bytes: int = Field(default=8192, ge=1024)
+    profile: str = Field(default="bounded", pattern=r"^(bounded|large)$")
+    model: str = "gpt-6-luna"
+    input_tokens: int = Field(default=1000000, ge=1024, le=1000000)
 
 
 def required_view(state):
@@ -244,7 +249,9 @@ class DefaultContextBuilder(Component):
             lookup = getattr(self.store, "memory", None)
             if lookup:
                 memory = InvestigationMemory.model_validate(
-                    await lookup(state, candidates)
+                    await lookup(state, candidates, None)
+                    if self.settings.profile == "large"
+                    else await lookup(state, candidates)
                 )
             else:
                 # Legacy stores still supply cumulative outcomes via history.
@@ -261,7 +268,10 @@ class DefaultContextBuilder(Component):
                     ],
                     progress={"actions": len(outcomes)},
                 )
-            while len(memory.model_dump_json().encode()) > self.settings.memory_bytes:
+            while (
+                self.settings.profile != "large"
+                and len(memory.model_dump_json().encode()) > self.settings.memory_bytes
+            ):
                 if len(memory.facts) > 2:
                     memory.facts.pop()
                     memory.progress["omitted_facts"] = (
@@ -275,15 +285,89 @@ class DefaultContextBuilder(Component):
                     raise ValueError(
                         "essential cumulative memory exceeds context budget"
                     )
-        return DecisionRequest(
+        request = DecisionRequest(
             incident_id=state.incident_id,
             state=view,
             candidates=candidates,
             memory=memory,
         )
+        if self.settings.profile == "large":
+            choices = getattr(self.store, "recent_choices", None)
+            request.retrieval = {
+                "tool": "history.query",
+                "query": {},
+                "recent_model_choices": await choices(state, 100) if choices else [],
+                "original_live_evidence_requires_revalidation": True,
+            }
+            request.context_metadata = {
+                "profile": "large",
+                "input_budget": self.settings.input_tokens,
+                "interpretations": "Hypotheses, scores and diagnosis text are interpretations; private reasoning is unavailable.",
+            }
+
+            def projected_input():
+                value = request.model_dump(mode="json")
+                value.update(encode_catalogue(value["candidates"]))
+                return value
+
+            while (
+                estimate(projected_input(), self.settings.model)["estimated_tokens"]
+                > self.settings.input_tokens
+            ):
+                trimmed = await self.trim(request)
+                if trimmed is None:
+                    break  # Provider check diagnoses required-context overflow.
+                request = trimmed
+        return request
 
     async def trim(self, request):
         request = request.model_copy(deep=True)
+        original_size = len(request.model_dump_json())
+        for usage in request.action_history.values():
+            if usage.get("latest_saved_result"):
+                saved = usage.pop("latest_saved_result")
+                usage["omitted_result_refs"] = list(saved)
+                if len(request.model_dump_json()) < original_size:
+                    return request
+                usage.pop("omitted_result_refs")
+                usage["latest_saved_result"] = saved
+            if len(usage.get("entries", [])) > 1:
+                usage["omitted_entries"] = (
+                    int(usage.get("omitted_entries", 0)) + len(usage["entries"]) - 1
+                )
+                usage["entries"] = usage["entries"][:1]
+                return request
+        if self.settings.profile == "large":
+            omissions = request.context_metadata.setdefault("omissions", {})
+            if request.memory and len(request.memory.facts) > 2:
+                keep = max(2, len(request.memory.facts) // 2)
+                omitted = request.memory.facts[keep:]
+                request.memory.facts = request.memory.facts[:keep]
+                request.memory.progress["omitted_facts"] = int(
+                    request.memory.progress.get("omitted_facts", 0)
+                ) + len(omitted)
+                omissions["facts"] = int(omissions.get("facts", 0)) + len(omitted)
+                request.retrieval["omitted_fact_queries"] = [
+                    {"category": "fact", "offset": 0}
+                ]
+                return request
+            if request.memory and len(request.memory.actions) > 1:
+                keep = max(1, len(request.memory.actions) // 2)
+                omissions["actions"] = (
+                    int(omissions.get("actions", 0))
+                    + len(request.memory.actions)
+                    - keep
+                )
+                request.memory.actions = request.memory.actions[:keep]
+                request.retrieval["omitted_action_query"] = {"category": "action"}
+                return request
+            if request.retrieval.get("recent_model_choices"):
+                omissions["model_choices"] = len(
+                    request.retrieval["recent_model_choices"]
+                )
+                request.retrieval["recent_model_choices"] = []
+                request.retrieval["omitted_choices_query"] = {"category": "choice"}
+                return request
         if request.state.attempts:
             request.state.attempts = request.state.attempts[1:]
             return request
@@ -328,10 +412,6 @@ class DefaultPolicy(Component):
     async def validate(self, candidate, state, budget):
         if budget["seconds_remaining"] <= 0:
             return ValidationResult(allowed=False, reason="incident deadline exhausted")
-        if budget["attempts"] >= self.limits.identical_attempts:
-            return ValidationResult(
-                allowed=False, reason="identical action attempt limit reached"
-            )
         if candidate.effect == "change":
             if not self.settings.allow_changes:
                 return ValidationResult(
@@ -369,10 +449,19 @@ class DefaultPolicy(Component):
                 )
             observed = by_id[oid]
             age = (current - observed.observed_at).total_seconds()
+            pinned = (
+                observed.immutable_snapshot is not None
+                and observed.immutable_snapshot
+                == state.payload.get("index_fingerprint")
+                and state.memory_scope is not None
+                and state.memory_scope.namespace == "itbench-aa"
+                and state.memory_scope.partition == state.incident_id
+                and all(r.platform == "itbench-aa" for r in state.resources)
+            )
             if (
                 observed.resource_id not in candidate.resources
                 or age < 0
-                or age > self.limits.freshness_seconds
+                or (age > self.limits.freshness_seconds and not pinned)
             ):
                 return ValidationResult(
                     allowed=False,

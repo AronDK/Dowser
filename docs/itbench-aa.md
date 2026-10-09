@@ -1,3 +1,12 @@
+# Decisions profile
+
+The benchmark CLI now defaults to OpenAI Decisions with `gpt-6-luna`; Jev remains
+selectable with `--provider jev`. The global catalogue, repeat execution, SQLite
+history, large context and automatic JSONL journal are documented in
+[Decisions and history](openai-decisions.md). OpenAI paid runs require account
+RPM/TPM configuration. Previous campaigns remain historical results; create a new
+campaign for the new harness. The previous Jev workflow is retained below.
+
 # ITBench-AA through Dowser and Jev
 
 This is **ITBench-AA public subset — Dowser/Jev adapted evaluation**, an offline

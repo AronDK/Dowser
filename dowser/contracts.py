@@ -268,6 +268,10 @@ OPTIONAL_INTERFACES = {
         "append_many": 2,
         "assessment_cache": 2,
         "observations": 2,
+        "action_history": 2,
+        "query_history": 2,
+        "recent_choices": 2,
+        "action_templates": 2,
     },
 }
 

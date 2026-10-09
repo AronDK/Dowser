@@ -27,7 +27,7 @@ class Ledger:
         path,
         *,
         budget=_INHERIT,
-        price=PRICE_NANODOLLARS_PER_TOKEN,
+        price=_INHERIT,
         call_limit=_INHERIT,
     ):
         self.path = Path(path)
@@ -43,6 +43,13 @@ class Ledger:
                 "request_id": "TEXT",
                 "failure_details": "TEXT",
                 "timing_seconds": "TEXT",
+                "provider": "TEXT NOT NULL DEFAULT 'typesafe'",
+                "model": "TEXT NOT NULL DEFAULT 'jev-1.13.0'",
+                "endpoint": "TEXT NOT NULL DEFAULT '/v1/decisions'",
+                "reserved_tokens": "INTEGER NOT NULL DEFAULT 64000",
+                "token_ceiling": "INTEGER NOT NULL DEFAULT 64000",
+                "long_context_threshold": "INTEGER",
+                "long_context_multiplier": "INTEGER NOT NULL DEFAULT 1",
             }.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE calls ADD COLUMN {name} {definition}")
@@ -50,6 +57,8 @@ class Ledger:
                 "CREATE TABLE IF NOT EXISTS prior_spending(source TEXT PRIMARY KEY,sha256 TEXT NOT NULL,accounted INTEGER NOT NULL,calls INTEGER NOT NULL,unknown_calls INTEGER NOT NULL)"
             )
             policy = db.execute("SELECT * FROM policy").fetchone()
+            if price is _INHERIT:
+                price = policy[1] if policy else PRICE_NANODOLLARS_PER_TOKEN
             if budget is _INHERIT:
                 budget = policy[0] if policy else None
             if call_limit is _INHERIT:
@@ -131,7 +140,22 @@ class Ledger:
                     raise SpendingLimit("previous spending exceeds campaign ceiling")
                 db.execute("INSERT INTO prior_spending VALUES(?,?,?,?,?)", value)
 
-    def reserve(self, trial, *, attempt=1, request_id=None):
+    def reserve(
+        self,
+        trial,
+        *,
+        attempt=1,
+        request_id=None,
+        tokens=REQUEST_CEILING,
+        token_ceiling=REQUEST_CEILING,
+        provider="typesafe",
+        model="jev-1.13.0",
+        endpoint="/v1/decisions",
+        long_context_threshold=None,
+        long_context_multiplier=1,
+    ):
+        if type(tokens) is not int or not 0 <= tokens <= token_ceiling:
+            raise ValueError("invalid context-sized reservation")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if self.call_limit is not None and (
@@ -147,28 +171,54 @@ class Ledger:
             spent += db.execute(
                 "SELECT COALESCE(SUM(accounted),0) FROM prior_spending"
             ).fetchone()[0]
-            amount = REQUEST_CEILING * self.price
+            multiplier = (
+                long_context_multiplier
+                if long_context_threshold is not None
+                and tokens > long_context_threshold
+                else 1
+            )
+            amount = tokens * self.price * multiplier
             if self.budget is not None and spent + amount > self.budget:
                 raise SpendingLimit("campaign spending ceiling reached")
             return db.execute(
-                "INSERT INTO calls(trial,status,reserved,attempt,request_id) VALUES(?,'unknown',?,?,?)",
-                (trial, amount, attempt, request_id),
+                "INSERT INTO calls(trial,status,reserved,attempt,request_id,provider,model,endpoint,reserved_tokens,token_ceiling,long_context_threshold,long_context_multiplier) VALUES(?,'unknown',?,?,?,?,?,?,?,?,?,?)",
+                (
+                    trial,
+                    amount,
+                    attempt,
+                    request_id,
+                    provider,
+                    model,
+                    endpoint,
+                    tokens,
+                    token_ceiling,
+                    long_context_threshold,
+                    long_context_multiplier,
+                ),
             ).lastrowid
 
     def reconcile(self, call_id, usage, latency):
-        if (
-            any(
-                type(usage.get(k)) is not int or usage[k] < 0
-                for k in ("input_tokens", "output_tokens")
-            )
-            or usage["input_tokens"] > REQUEST_CEILING
+        if any(
+            type(usage.get(k)) is not int or usage[k] < 0
+            for k in ("input_tokens", "output_tokens")
         ):
             raise ValueError("usage outside documented ceiling; reservation retained")
         with self.connect() as db:
+            policy = db.execute(
+                "SELECT token_ceiling,long_context_threshold,long_context_multiplier FROM calls WHERE id=? AND status='unknown'",
+                (call_id,),
+            ).fetchone()
+            if not policy or usage["input_tokens"] > policy[0]:
+                raise ValueError("usage outside model ceiling; reservation retained")
+            multiplier = (
+                policy[2]
+                if policy[1] is not None and usage["input_tokens"] > policy[1]
+                else 1
+            )
             updated = db.execute(
                 "UPDATE calls SET status='known',reserved=?,input_tokens=?,output_tokens=?,latency=? WHERE id=? AND status='unknown'",
                 (
-                    usage["input_tokens"] * self.price,
+                    usage["input_tokens"] * self.price * multiplier,
                     usage["input_tokens"],
                     usage["output_tokens"],
                     latency,

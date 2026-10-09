@@ -38,6 +38,8 @@ from .models import RawIncident
 DEFAULT_DATASET = Path.home() / "Projects/ITBench-AA"
 DEFAULT_ROOT = Path(".local/itbench-aa-prepared-v2")
 DEFAULTS = {
+    "provider": "jev",
+    "openai": {},
     "model": "jev-1.13.0",
     "calls": None,
     "incident_seconds": 1800,
@@ -303,6 +305,14 @@ def code_metadata(base):
 
 
 def campaign_manifest(prepared, base):
+    configuration = dict(DEFAULTS)
+    if DEFAULTS["provider"] == "openai":
+        configuration.update(
+            model="gpt-6-luna",
+            candidates="grouped",
+            memory_profile="large",
+            input_tokens=1000000,
+        )
     return {
         "title": TITLE,
         "created_at": datetime.now(UTC).isoformat(),
@@ -314,15 +324,39 @@ def campaign_manifest(prepared, base):
         "python": platform.python_version(),
         "dependency_lock_sha256": file_hash(base / "uv.lock"),
         "code_hashes": code_metadata(base),
-        "configuration": DEFAULTS,
+        "configuration": configuration,
         "pricing": {
-            "input_nanodollars_per_token": PRICE_NANODOLLARS_PER_TOKEN,
+            "input_nanodollars_per_token": (
+                110 if DEFAULTS["openai"].get("regional_processing") else 100
+            )
+            if DEFAULTS["provider"] == "openai"
+            else PRICE_NANODOLLARS_PER_TOKEN,
             "output_nanodollars_per_token": 0,
-            "request_token_ceiling": REQUEST_CEILING,
-            "source": "https://docs.typesafe.ai/models",
+            "request_token_ceiling": 1050000
+            if DEFAULTS["provider"] == "openai"
+            else REQUEST_CEILING,
+            "long_context_threshold": 272000
+            if DEFAULTS["provider"] == "openai"
+            else None,
+            "long_context_input_multiplier": 2
+            if DEFAULTS["provider"] == "openai"
+            else 1,
+            "source": "https://developers.openai.com/api/docs/guides/decisions"
+            if DEFAULTS["provider"] == "openai"
+            else "https://docs.typesafe.ai/models",
             "verified_at": datetime.now(UTC).isoformat(),
         },
-        "methodological_differences": METHOD_DIFFERENCES,
+        "methodological_differences": [
+            *METHOD_DIFFERENCES[:1],
+            "Model-led repeat execution; complete catalogue independent of view. History is read-only, incident-isolated SQLite retrieval; no SQL or grader content enters model input.",
+            "OpenAI uses native Decisions with gpt-6-luna; groups contain 254 actions plus wait, up to six independent questions per request, followed by model selection among winners. No fallback or global probability comparison. Jev remains selectable with its own limits.",
+            "Large context assembles all admitted facts when they fit, action outcomes, previous choices including waits and relevant saved results. Overflow counts and retrieval queries are explicit. Original evidence segments are retained; unobserved segments are not admitted.",
+            "SQLite is authoritative with FULL durability and a transactional outbox. JSONL mirrors events automatically; large payloads and tool results use hashed artifact files. Repair never replays tools.",
+            "Snapshot observations stay valid for their fingerprint; live observations require freshness. Scores, hypotheses and code-generated diagnoses are interpretations; private reasoning is unavailable.",
+            "A 30-minute watchdog bounds unfinished execution. No monetary or call ceiling. Account RPM/TPM are required for OpenAI, with per-stage and retry admission. Jev retains 80 requests/s and 100,000 tokens/s. Unknown billing reservations remain durable.",
+            *METHOD_DIFFERENCES[3:5],
+            *METHOD_DIFFERENCES[8:10],
+        ],
         "sources": [
             "https://huggingface.co/datasets/ArtificialAnalysis/ITBench-AA",
             "https://artificialanalysis.ai/methodology/intelligence-benchmarking#itbench-aa",
@@ -334,6 +368,28 @@ def campaign_manifest(prepared, base):
 
 
 def freeze_price_source(directory):
+    if DEFAULTS["provider"] == "openai":
+        import urllib.request
+
+        doc = (
+            urllib.request.urlopen(
+                "https://developers.openai.com/api/docs/guides/decisions.md", timeout=15
+            )
+            .read()
+            .decode()
+        )
+        model_doc = (
+            urllib.request.urlopen(
+                "https://developers.openai.com/api/docs/models/gpt-6-luna.md",
+                timeout=15,
+            )
+            .read()
+            .decode()
+        )
+        if "$0.10" not in doc or "272" not in model_doc or "2x" not in model_doc:
+            raise ValueError("Decisions pricing changed; verify before paid execution")
+        (directory / "pricing-source.md").write_text(doc + "\n" + model_doc)
+        return file_hash(directory / "pricing-source.md")
     import urllib.request
 
     price_doc = (
@@ -386,7 +442,10 @@ def trial_config(campaign, prepared, scenario, trial, seed):
             },
             "event_store": {
                 "factory": "dowser.store:sqlite_store",
-                "settings": {"path": str(campaign / "history.sqlite3")},
+                "settings": {
+                    "path": str(campaign / "history.sqlite3"),
+                    "journal": str(campaign / "audit.jsonl"),
+                },
             },
             "tool_registry": {
                 "factory": "dowser.core:tool_registry",
@@ -395,7 +454,8 @@ def trial_config(campaign, prepared, scenario, trial, seed):
                         {
                             "factory": "plugins.itbench_aa:tool_plugin",
                             "settings": settings,
-                        }
+                        },
+                        {"factory": "plugins.history:tool_plugin"},
                     ]
                 },
             },
@@ -408,11 +468,16 @@ def trial_config(campaign, prepared, scenario, trial, seed):
                 "settings": {
                     "recent_outcomes": 4,
                     "memory_bytes": DEFAULTS["memory_bytes"],
+                    "profile": "large"
+                    if DEFAULTS["provider"] == "openai"
+                    else "bounded",
                 },
             },
             "decision_provider": {
                 "factory": "plugins.itbench_aa:decision_provider",
                 "settings": {
+                    "provider": DEFAULTS["provider"],
+                    "openai": DEFAULTS["openai"],
                     "ledger": str(campaign / "spending.sqlite3"),
                     "trial": trial,
                     "assessments": DEFAULTS["assessments"],
@@ -903,6 +968,12 @@ async def run_campaign(
     resume_runner_update=False,
     continue_interrupted=False,
 ):
+    if DEFAULTS["provider"] == "openai":
+        from plugins.openai_decisions import OpenAISettings
+
+        account = OpenAISettings.model_validate(DEFAULTS["openai"])
+        if account.requests_per_minute is None or account.tokens_per_minute is None:
+            raise ValueError("configure OpenAI account RPM and TPM before paid runs")
     if continue_interrupted and phase != "pilot":
         raise ValueError("interrupted-case continuation is restricted to pilot phase")
     base = Path(base or Path.cwd()).absolute()
@@ -1001,7 +1072,18 @@ async def run_campaign(
                 )
             )
             candidates = await Plugin(settings, context).candidates(state)
-            check = await JevProvider(JevSettings(), context).check_context(
+            if DEFAULTS["provider"] == "openai":
+                from plugins.openai_decisions import (
+                    OpenAIDecisionsProvider,
+                    OpenAISettings,
+                )
+
+                provider = OpenAIDecisionsProvider(
+                    OpenAISettings.model_validate(DEFAULTS["openai"]), context
+                )
+            else:
+                provider = JevProvider(JevSettings(), context)
+            check = await provider.check_context(
                 DecisionRequest(
                     incident_id="preflight", state=state, candidates=candidates
                 )
@@ -1013,7 +1095,12 @@ async def run_campaign(
             )
         atomic_json(campaign / "preflight.json", preflight)
         campaign_ledger = Ledger(
-            campaign / "spending.sqlite3", budget=None, call_limit=None
+            campaign / "spending.sqlite3",
+            budget=None,
+            call_limit=None,
+            price=(110 if DEFAULTS["openai"].get("regional_processing") else 100)
+            if DEFAULTS["provider"] == "openai"
+            else PRICE_NANODOLLARS_PER_TOKEN,
         )
         if previous:
             campaign_ledger.inherit(previous)
@@ -1164,6 +1251,10 @@ def main(argv=None):
                 help="Copy matching sanitized indexes into a separate versioned preparation root",
             )
         if name == "run":
+            sub.add_argument("--provider", choices=["openai", "jev"], default="openai")
+            sub.add_argument("--openai-rpm", type=int)
+            sub.add_argument("--openai-tpm", type=int)
+            sub.add_argument("--regional-processing", action="store_true")
             sub.add_argument(
                 "--assessments",
                 action="store_true",
@@ -1202,12 +1293,19 @@ def main(argv=None):
         if name == "report":
             sub.add_argument("campaign", type=Path)
     args = parser.parse_args(argv)
+    previous_defaults = dict(DEFAULTS)
     try:
         if args.command == "download":
             download(args.dataset)
         elif args.command == "prepare":
             prepare(args.dataset, args.root, args.source_indexes)
         elif args.command == "run":
+            DEFAULTS["provider"] = args.provider
+            DEFAULTS["openai"] = {
+                "requests_per_minute": args.openai_rpm,
+                "tokens_per_minute": args.openai_tpm,
+                "regional_processing": args.regional_processing,
+            }
             DEFAULTS["assessments"] = args.assessments
             from plugins.escalation import Settings as EscalationSettings
 
@@ -1247,6 +1345,9 @@ def main(argv=None):
             flush=True,
         )
         return 1
+    finally:
+        DEFAULTS.clear()
+        DEFAULTS.update(previous_defaults)
     return 0
 
 

@@ -22,12 +22,14 @@ class RateLimiter:
         *,
         clock=time.monotonic,
         sleeper=asyncio.sleep,
+        window_seconds=1,
     ):
         if requests_per_second < 1 or tokens_per_second < 1:
             raise ValueError("rate limits must be positive")
         self.requests_per_second = requests_per_second
         self.tokens_per_second = tokens_per_second
         self.clock, self.sleeper = clock, sleeper
+        self.window_seconds = window_seconds
         self.lock = threading.Lock()
         self.window = deque()
 
@@ -40,7 +42,10 @@ class RateLimiter:
                 current = self.clock()
                 if deadline is not None and current >= deadline:
                     raise TimeoutError("rate admission exceeded provider deadline")
-                while self.window and self.window[0].started <= current - 1:
+                while (
+                    self.window
+                    and self.window[0].started <= current - self.window_seconds
+                ):
                     self.window.popleft()
                 if (
                     len(self.window) < self.requests_per_second
@@ -50,7 +55,9 @@ class RateLimiter:
                     ticket = Admission(current, tokens, current - started)
                     self.window.append(ticket)
                     return ticket
-                delay = max(0.001, self.window[0].started + 1 - current)
+                delay = max(
+                    0.001, self.window[0].started + self.window_seconds - current
+                )
                 if deadline is not None and current + delay >= deadline:
                     raise TimeoutError("rate admission exceeded provider deadline")
             await self.sleeper(delay)
@@ -71,15 +78,24 @@ _shared = {}
 _shared_lock = threading.Lock()
 
 
-def shared_rate_limiter(key, requests_per_second, tokens_per_second):
+def shared_rate_limiter(
+    key, requests_per_second, tokens_per_second, *, window_seconds=1
+):
     """Keep one campaign admission window across per-trial provider construction."""
     with _shared_lock:
         if key not in _shared:
-            _shared[key] = RateLimiter(requests_per_second, tokens_per_second)
+            _shared[key] = RateLimiter(
+                requests_per_second, tokens_per_second, window_seconds=window_seconds
+            )
         limiter = _shared[key]
-        if (limiter.requests_per_second, limiter.tokens_per_second) != (
+        if (
+            limiter.requests_per_second,
+            limiter.tokens_per_second,
+            limiter.window_seconds,
+        ) != (
             requests_per_second,
             tokens_per_second,
+            window_seconds,
         ):
             raise ValueError("shared rate policy changed")
         return limiter

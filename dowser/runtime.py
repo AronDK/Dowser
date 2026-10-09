@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from contextvars import ContextVar, copy_context
 
-WAKE_INTERVAL = 0.01
+WAKE_INTERVAL = 0.001
 call_deadline = ContextVar("dowser_call_deadline", default=None)
 
 
@@ -77,8 +77,20 @@ async def bounded_call(fn: Callable, *args, seconds: float):
         except BaseException as error:
             notify(error=error)
 
+    def worker_run():
+        with asyncio.Runner() as runner:
+            loop = runner.get_loop()
+
+            def wake():
+                # Also wake SDK thread callbacks during Runner's executor shutdown.
+                # Restricted self-pipe writes must not strand cleanup for 300s.
+                loop.call_later(WAKE_INTERVAL, wake)
+
+            loop.call_later(WAKE_INTERVAL, wake)
+            runner.run(invoke())
+
     def run():
-        invocation_context.run(asyncio.run, invoke())
+        invocation_context.run(worker_run)
 
     threading.Thread(target=run, daemon=True, name="dowser-extension").start()
     try:

@@ -48,6 +48,7 @@ class Observation(Boundary):
     kind: str = Field(min_length=1)
     payload: dict[str, JsonValue]
     evidence_refs: list[str] = Field(default_factory=list)
+    immutable_snapshot: str | None = None
 
     @model_validator(mode="after")
     def aware(self):
@@ -203,6 +204,9 @@ class DecisionRequest(Boundary):
     state: IncidentState
     candidates: list[ActionCandidate]
     memory: InvestigationMemory | None = None
+    action_history: dict[str, JsonValue] = Field(default_factory=dict)
+    retrieval: dict[str, JsonValue] = Field(default_factory=dict)
+    context_metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class ContextCheck(Boundary):
@@ -357,7 +361,7 @@ class Event(Boundary):
 class Limits(Boundary):
     incident_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
     tool_seconds: float = Field(default=15, gt=0, allow_inf_nan=False)
-    identical_attempts: int = Field(default=2, ge=1)
+    identical_attempts: int = Field(default=2, ge=1, deprecated=True)
     changes: int = Field(default=0, ge=0)
     freshness_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 

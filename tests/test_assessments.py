@@ -245,7 +245,7 @@ class AssessmentTests(unittest.IsolatedAsyncioTestCase):
                 focused = next(
                     c
                     for c in candidates
-                    if c.args["operation"] == "focus" and c.args["entity"] == ENTITY
+                    if c.args.get("operation") == "focus" and c.args["entity"] == ENTITY
                 )
                 transport = await registry.execute(focused, state)
                 parsed = await registry.parse(focused, transport)
@@ -281,7 +281,7 @@ class AssessmentTests(unittest.IsolatedAsyncioTestCase):
                     set(c.id for c in request.candidates),
                 )
                 self.assertFalse(
-                    any(c.args["operation"] == "nominate" for c in first.candidates)
+                    any(c.args.get("operation") == "nominate" for c in first.candidates)
                 )
                 self.assertTrue(first.memory.hypotheses[0]["contradictory"])
                 memory = await store.memory(state, candidates)

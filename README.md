@@ -6,8 +6,10 @@ verification, with SQLite history. Read the [architecture blog](https://akeness.
 The core Python package lives in `dowser/`. The `plugins/` package includes NX-OS diagnostics, restricted interface fixes, and
 vLLM decision-provider and managed-service adapters. See the [platform guide](docs/platforms.md).
 
-The optional [Jev provider](docs/jev.md) supports the
-[ITBench-AA public-subset evaluation](docs/itbench-aa.md) through `dowser-bench`.
+The optional [OpenAI Decisions provider](docs/openai-decisions.md) and
+[Jev provider](docs/jev.md) support the [ITBench-AA public-subset evaluation](docs/itbench-aa.md)
+through `dowser-bench`. Decisions uses native `gpt-6-luna` choices, queryable SQLite
+history, repeatable authorized actions and optional large cumulative context.
 
 ## Install
 
@@ -45,7 +47,8 @@ severity ranking, and durable completion checkpoints.
 
 Providers can return multiple actionable decisions per response, constrained by
 their selected model's advertised capability. There is no harness decision-round
-count limit; incident deadlines and action limits still apply. See the
+count limit; incident deadlines, authorization and effect budgets still apply.
+Prior use never vetoes an otherwise authorized action. See the
 [provider contract](docs/extensions.md#context-and-provider-adapters).
 
 Actions are read-only by default. Changes require `allow_changes: true` in policy

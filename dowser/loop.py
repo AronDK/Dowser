@@ -1,6 +1,7 @@
 """One-incident orchestration with durable authorization and outcome boundaries."""
 
 import asyncio
+import hashlib
 import time
 from itertools import count
 
@@ -75,6 +76,7 @@ class DefaultIncidentLoop(Component):
         evidence = set()
         observed_ids = {o.id for o in state.observations}
         timings = {}
+        validation_events = []
 
         def measure(name, duration):
             entry = timings.setdefault(name, {"seconds": 0.0, "count": 0})
@@ -144,20 +146,29 @@ class DefaultIncidentLoop(Component):
             await record("terminated", result.model_dump(mode="json"))
             return result
 
-        async def gate(candidate, stage):
+        async def gate(candidate, stage, inline=False):
+            async def invoke(fn, *args):
+                if not inline:
+                    return await call(fn, *args)
+                value = fn(*args)
+                return await value if hasattr(value, "__await__") else value
+
             identity_hook = getattr(registry, "action_identity", None)
             identity = ActionIdentity.model_validate(
-                await call(identity_hook, candidate, state)
+                await invoke(identity_hook, candidate, state)
                 if identity_hook
                 else action_identity(candidate)
             )
             identities[candidate.id] = identity
             count_hook = getattr(store, "action_count", None)
-            attempted = (
-                await count_hook(state.incident_id, identity)
-                if count_hook
-                else attempts.get(identity.key, 0)
-            )
+            count_lookup_status = "unsupported"
+            attempted = attempts.get(identity.key, 0)
+            if count_hook:
+                try:
+                    attempted = await count_hook(state.incident_id, identity)
+                    count_lookup_status = "ok"
+                except Exception:
+                    count_lookup_status = "failed_runtime_count_used"
             budget = {
                 "seconds_remaining": remaining(),
                 "attempts": attempted,
@@ -167,17 +178,13 @@ class DefaultIncidentLoop(Component):
                 result = ValidationResult(
                     allowed=False, reason="incident deadline exhausted"
                 )
-            elif budget["attempts"] >= self.limits.identical_attempts:
-                result = ValidationResult(
-                    allowed=False, reason="identical action attempt limit reached"
-                )
             elif candidate.effect == "change" and changes >= self.limits.changes:
                 result = ValidationResult(
                     allowed=False, reason="change budget exhausted"
                 )
             else:
                 result = ValidationResult.model_validate(
-                    await call(
+                    await invoke(
                         registry.validate,
                         candidate.model_copy(deep=True),
                         copy_state([candidate]),
@@ -185,21 +192,26 @@ class DefaultIncidentLoop(Component):
                 )
                 if result.allowed:
                     result = ValidationResult.model_validate(
-                        await call(
+                        await invoke(
                             policy.validate,
                             candidate.model_copy(deep=True),
                             copy_state([candidate]),
                             budget,
                         )
                     )
-            await record(
-                "validation_outcome",
-                {
-                    "action_id": candidate.id,
-                    "stage": stage,
-                    **result.model_dump(mode="json"),
-                },
-            )
+            payload = {
+                "action_id": candidate.id,
+                "stage": stage,
+                "candidate": candidate.model_dump(mode="json"),
+                "identity": identity.model_dump(mode="json"),
+                "prior_attempts": attempted,
+                "count_lookup_status": count_lookup_status,
+                **result.model_dump(mode="json"),
+            }
+            if inline:
+                validation_events.append(("validation_outcome", payload))
+            else:
+                await record("validation_outcome", payload)
             return result
 
         def protected(request, candidates):
@@ -298,18 +310,44 @@ class DefaultIncidentLoop(Component):
                             )
                         state.observations.extend(restored)
                 ids, allowed, rejected = set(), [], []
-                for value in candidates:
-                    candidate = ActionCandidate.model_validate(value).model_copy(
-                        deep=True
+                identities.clear()
+                await record(
+                    "candidate_snapshot",
+                    {
+                        "round": round_number,
+                        "stage": "proposed",
+                        "proposed_candidates": [
+                            ActionCandidate.model_validate(c).model_dump(mode="json")
+                            for c in candidates
+                        ],
+                    },
+                )
+
+                async def validate_catalogue(inline):
+                    for value in candidates:
+                        candidate = ActionCandidate.model_validate(value).model_copy(
+                            deep=True
+                        )
+                        if candidate.id in ids:
+                            raise ValueError("duplicate candidate ID")
+                        ids.add(candidate.id)
+                        verdict = await gate(candidate, "before_selection", inline)
+                        if verdict.allowed:
+                            allowed.append(candidate)
+                        else:
+                            rejected.append(verdict.reason)
+
+                batch_append = getattr(store, "append_many", None)
+                if self.settings.batch_diagnostics and batch_append:
+                    validation_events.clear()
+                    await call(validate_catalogue, True)
+                    events = await batch_append(state.incident_id, validation_events)
+                    evidence.update(
+                        f"{state.incident_id}:{event.sequence}" for event in events
                     )
-                    if candidate.id in ids:
-                        raise ValueError("duplicate candidate ID")
-                    ids.add(candidate.id)
-                    verdict = await gate(candidate, "before_selection")
-                    if verdict.allowed:
-                        allowed.append(candidate)
-                    else:
-                        rejected.append(verdict.reason)
+                    validation_events.clear()
+                else:
+                    await validate_catalogue(False)
                 if not allowed:
                     return await terminate(
                         "no applicable actions"
@@ -329,19 +367,43 @@ class DefaultIncidentLoop(Component):
                     )
                 )
                 protected(request, allowed)
+                history_lookup = getattr(store, "action_history", None)
+                if history_lookup:
+                    try:
+                        request.action_history = await call(
+                            history_lookup,
+                            state,
+                            {c.id: identities[c.id] for c in allowed},
+                        )
+                    except Exception as exc:
+                        request.action_history = {
+                            c.id: {
+                                "lookup_status": "failed",
+                                "error_type": type(exc).__name__,
+                            }
+                            for c in allowed
+                        }
+                else:
+                    request.retrieval["action_history_lookup"] = "unsupported"
                 minimum_memory = (
-                    request.memory.model_copy(deep=True)
+                    request.memory.model_copy(
+                        update={
+                            "facts": request.memory.facts[:2],
+                            "actions": request.memory.actions[:1],
+                        }
+                    ).model_copy(deep=True)
                     if request.memory is not None
                     else None
                 )
                 seen_contexts = set()
                 while True:
                     serialized = request.model_dump_json()
-                    if serialized in seen_contexts:
+                    context_digest = hashlib.sha256(serialized.encode()).digest()
+                    if context_digest in seen_contexts:
                         return await terminate(
                             "context builder made no progress reducing context"
                         )
-                    seen_contexts.add(serialized)
+                    seen_contexts.add(context_digest)
                     try:
                         check = ContextCheck.model_validate(
                             await call(
@@ -385,6 +447,12 @@ class DefaultIncidentLoop(Component):
                         {
                             "request_id": request.id,
                             "candidates": [c.model_dump(mode="json") for c in allowed],
+                            "proposed_candidates": [
+                                ActionCandidate.model_validate(c).model_dump(
+                                    mode="json"
+                                )
+                                for c in candidates
+                            ],
                         },
                     ),
                     (

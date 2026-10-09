@@ -18,7 +18,7 @@ def action_identity(candidate):
             [
                 candidate.tool,
                 candidate.plugin_version,
-                candidate.resources,
+                sorted(candidate.resources),
                 candidate.args,
             ]
         )
@@ -48,7 +48,7 @@ def facts_from_parse(parsed):
             evidence_refs=[o.id, *o.evidence_refs],
         )
         for o in parsed.observations
-        if o.kind != "investigation"
+        if o.kind not in {"investigation", "history"}
     ]
 
 
