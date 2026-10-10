@@ -54,6 +54,17 @@ Every evaluation receives the same complete catalogue and shared evidence.
 Repeated per-tool fields, text prefixes, repeated argument strings, description
 templates and identical history lookup results are encoded losslessly with explicit
 defaults and tables; decoding restores every candidate field and argument.
+The current `per_tool_tables/2` encoding supplies an ordered `candidate_tables`
+array. Each table contains `tool`, `columns` and `rows`. A row is
+`[mask, ...values]`: bit `2^i` selects `columns[i]`, and values follow set bits in
+column order. Unset bits mean absent fields, preserving the distinction from
+explicit null. The table supplies the tool; existing defaults, prefixes, string
+tables and description templates restore other fields. Optional `candidate_order`
+indexes the flattened rows to preserve the original order across mixed tools.
+JSON object-key reordering does not change decoding. The full plain catalogue is
+removed from the compressed input; complete proposed definitions remain in SQLite
+and the audit. The decoder still accepts saved `per_tool_defaults/1` inputs.
+
 Native choice values always use the actual supplied action IDs. A new
 request selects among group winners and wait; this repeats if necessary. If all
 groups choose wait, that wait is returned directly. Native choices are preserved;

@@ -12,7 +12,14 @@ from unittest.mock import patch
 
 from dowser.assessments import AssessmentQuestion, AssessmentRequest
 from dowser.bench_ledger import Ledger
-from dowser.catalogue import decode_catalogue, decode_decision_input
+from dowser.catalogue import (
+    CATALOGUE_ENCODING,
+    LEGACY_CATALOGUE_ENCODING,
+    decode_catalogue,
+    decode_decision_input,
+    encode_catalogue,
+    unpack_tables,
+)
 from dowser.contracts import AppContext
 from dowser.core import (
     ContextSettings,
@@ -167,7 +174,7 @@ class DecisionsTests(unittest.IsolatedAsyncioTestCase):
             0.2,
         )
         self.assertEqual(
-            json.loads(self.calls[0]["input"])["candidates"][0]["id"], "read"
+            decode_catalogue(json.loads(self.calls[0]["input"]))[0]["id"], "read"
         )
         history = await self.store.history("trial")
         self.assertIn("provider_api_request", [e.kind for e in history])
@@ -180,8 +187,6 @@ class DecisionsTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_catalogue_defaults_preserve_all_fields_and_json_types(self):
-        from dowser.catalogue import encode_catalogue
-
         values = [candidate(str(i)).model_dump(mode="json") for i in range(20)]
         values[0]["args"]["flag"] = True
         for value in values[1:]:
@@ -190,6 +195,72 @@ class DecisionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decode_catalogue(encoded), values)
         self.assertIs(decode_catalogue(encoded)[0]["args"]["flag"], True)
         self.assertLess(len(json.dumps(encoded)), len(json.dumps(values)))
+
+    async def test_tables_preserve_mixed_tool_order_missing_fields_and_json_types(self):
+        values = [candidate(str(i)).model_dump(mode="json") for i in range(12)]
+        for i, value in enumerate(values):
+            value["tool"] = ["z.inspect", "a.history", "z.inspect"][i % 3]
+            value["args"]["detail"] = [None, False, 0, 0.0, "", [], {}][i % 7]
+            if i % 2:
+                value["optional"] = None
+            value["args"]["nullable"] = None
+            if i % 4:
+                del value["args"]["nullable"]
+        encoded = encode_catalogue(values)
+        self.assertEqual(encoded["catalogue_encoding"], CATALOGUE_ENCODING)
+        self.assertNotIn("candidates", encoded)
+        self.assertIn("candidate_order", encoded)
+        # Object member order is not significant; table/column arrays preserve it.
+        serialized = json.loads(json.dumps(encoded, sort_keys=True))
+        self.assertEqual(decode_catalogue(serialized), values)
+        for original, decoded in zip(values, decode_catalogue(serialized), strict=True):
+            self.assertIs(
+                type(decoded["args"]["detail"]), type(original["args"]["detail"])
+            )
+        self.assertIsNone(decode_catalogue(encoded)[1]["optional"])
+        self.assertNotIn("optional", decode_catalogue(encoded)[0])
+        self.assertNotIn("nullable", decode_catalogue(encoded)[1]["args"])
+
+    async def test_legacy_catalogues_and_unencoded_inputs_still_decode(self):
+        values = [candidate(str(i)).model_dump(mode="json") for i in range(20)]
+        legacy = encode_catalogue(values, encoding=LEGACY_CATALOGUE_ENCODING)
+        self.assertEqual(legacy["catalogue_encoding"], LEGACY_CATALOGUE_ENCODING)
+        self.assertEqual(decode_catalogue(legacy), values)
+        self.assertEqual(decode_catalogue({"candidates": values}), values)
+        self.assertEqual(decode_catalogue(encode_catalogue([])), [])
+        self.assertNotIn("candidate_order", encode_catalogue(values))
+
+    async def test_corrupt_table_masks_columns_and_orders_fail_explicitly(self):
+        import copy
+
+        encoded = encode_catalogue([candidate().model_dump(mode="json")])
+        columns = encoded["candidate_tables"][0]["columns"]
+        for mask in (-1, True, 1 << len(columns), 0):
+            invalid = copy.deepcopy(encoded)
+            invalid["candidate_tables"][0]["rows"][0][0] = mask
+            with self.subTest(mask=mask), self.assertRaises(ValueError):
+                decode_catalogue(invalid)
+        for field_names in (["id", "id"], ["tool"], [None]):
+            invalid = copy.deepcopy(encoded)
+            invalid["candidate_tables"][0]["columns"] = field_names
+            with self.subTest(columns=field_names), self.assertRaises(ValueError):
+                decode_catalogue(invalid)
+        for order in ([], [-1], [True], [0, 0]):
+            invalid = {**encoded, "candidate_order": order}
+            with self.subTest(order=order), self.assertRaises(ValueError):
+                decode_catalogue(invalid)
+
+    async def test_tables_reduce_large_menus_without_duplicate_plain_catalogue(self):
+        self.request.candidates = [candidate(f"read-{i:04}") for i in range(1600)]
+        values = [c.model_dump(mode="json") for c in self.request.candidates]
+        legacy = encode_catalogue(values, encoding=LEGACY_CATALOGUE_ENCODING)
+        shared = json.loads(self.provider().input(self.request))
+        self.assertEqual(decode_catalogue(shared), values)
+        self.assertNotIn("candidates", shared)
+        self.assertLess(
+            len(json.dumps(shared["candidate_tables"])),
+            len(json.dumps(legacy["candidates"])),
+        )
 
     async def test_history_defaults_and_string_references_round_trip_failures(self):
         self.request.candidates = [candidate(str(i)) for i in range(20)]
@@ -221,8 +292,6 @@ class DecisionsTests(unittest.IsolatedAsyncioTestCase):
     async def test_description_templates_preserve_literals_and_argument_references(
         self,
     ):
-        from dowser.catalogue import encode_catalogue
-
         values = [candidate(str(i)).model_dump(mode="json") for i in range(20)]
         for i, value in enumerate(values):
             value["args"].update(
@@ -237,7 +306,7 @@ class DecisionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decode_catalogue(encoded), values)
         self.assertTrue(encoded["candidate_description_templates"])
         self.assertTrue(
-            all(type(c["description"]) is int for c in encoded["candidates"])
+            all(type(c["description"]) is int for c in unpack_tables(encoded))
         )
 
     async def test_rate_admission_splits_questions_without_omitting_candidates(self):

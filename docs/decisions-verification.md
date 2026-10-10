@@ -69,3 +69,27 @@ candidates, pilot resume regressions and saved native refusals advancing without
 replay. The effective request budget respects
 both context and TPM limits; preflight checks the requested phase. Ruff lint,
 formatting and whitespace checks passed for these changes.
+
+On 2026-10-10 the lossless table prototype became the default
+`per_tool_tables/2` input encoding. Decoding preserves candidate order, every
+field and JSON type, missing versus explicit-null fields, original action IDs,
+description references and candidate-linked history. Saved
+`per_tool_defaults/1` inputs remain decodable. Corrupt row masks, columns and
+order permutations fail explicitly. The provider removes the duplicate plain
+catalogue and explains the table format in native question instructions.
+
+Verification passed **186 tracked tests** and **116 private core tests**, including
+**28 focused Decisions/history tests**. Ruff lint, formatting and whitespace checks
+passed. Read-only comparisons of saved cases 8, 2 and 19 restored every candidate
+and history record exactly and reduced six-question estimates by **24.6–25.6%**.
+Case 19 changed from **524,186** to **390,210** estimated tokens for the first six
+questions, allowing six-question packing within the supplied 500,000 TPM budget.
+The estimates include the new decoding instructions; reported API usage with this
+format remains unmeasured. Receipts and logs are in the ignored
+`.local/table-encoding-verification/` directory.
+
+The already-running pilot retains its archived `per_tool_defaults/1` implementation;
+new inputs were not substituted into that campaign. No additional inference calls,
+tool replays or paid campaign were started to validate the new encoding. Offline
+round trips establish information preservation, not model understanding, refusal
+rates or diagnostic accuracy with the new presentation.
