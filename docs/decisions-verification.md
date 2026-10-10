@@ -63,8 +63,9 @@ call returned a valid native choice and usage. The pilot uses a new campaign and
 retains watchdog failures and unknown reservations without replay. Live results
 are separate from these offline coverage checks.
 
-Admission fixes for that configuration passed **30 focused tests**, including
+Admission fixes for that configuration passed **32 focused tests**, including
 lossless description-template decoding, adaptive question packing without omitted
-candidates, and pilot resume regressions. The effective request budget respects
+candidates, pilot resume regressions and saved native refusals advancing without
+replay. The effective request budget respects
 both context and TPM limits; preflight checks the requested phase. Ruff lint,
 formatting and whitespace checks passed for these changes.

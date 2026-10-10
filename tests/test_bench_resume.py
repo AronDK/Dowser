@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from dowser.bench import (
     DEFAULTS,
     failure_category,
+    model_refusal,
     normalize_report_row,
     record_runner_update,
     report,
@@ -22,6 +23,26 @@ from dowser.bench_ledger import Ledger
 
 
 class ResumeTests(unittest.TestCase):
+    def test_native_refusal_is_distinct_from_schema_and_transport_failures(self):
+        self.assertTrue(
+            model_refusal(
+                {
+                    "category": "provider",
+                    "failure": {"category": "response", "code": "refusal"},
+                }
+            )
+        )
+        for code in ("answer_schema", "unknown_choice", "malformed_response"):
+            self.assertFalse(
+                model_refusal(
+                    {
+                        "category": "provider",
+                        "failure": {"category": "response", "code": code},
+                    }
+                )
+            )
+        self.assertFalse(model_refusal({"category": "interrupted", "failure": None}))
+
     def test_successfully_trimmed_context_does_not_override_model_escalation(self):
         class Accounting:
             call_limit = None
@@ -165,6 +186,9 @@ class ResumeTests(unittest.TestCase):
 
 
 class PilotContinuationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_saved_refusal_is_not_replayed_and_unrun_cases_advance(self):
+        await self.check_saved_cases(False, refusal=True)
+
     async def test_saved_deadline_failure_is_not_replayed_and_six_unrun_cases_advance(
         self,
     ):
@@ -175,7 +199,7 @@ class PilotContinuationTests(unittest.IsolatedAsyncioTestCase):
     ):
         await self.check_saved_cases(True)
 
-    async def check_saved_cases(self, interrupted):
+    async def check_saved_cases(self, interrupted, refusal=False):
         saved_count = 5 if interrupted else 4
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -223,8 +247,8 @@ class PilotContinuationTests(unittest.IsolatedAsyncioTestCase):
                 }
                 if i == 3:
                     row["failure"] = {
-                        "code": "deadline_exceeded",
-                        "category": "timeout",
+                        "code": "refusal" if refusal else "deadline_exceeded",
+                        "category": "response" if refusal else "timeout",
                         "retryable": False,
                     }
                 path = campaign / "trials" / (trial + ".json")
@@ -281,7 +305,9 @@ class PilotContinuationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ledger.stats()["calls"], 10)
             self.assertEqual(ledger.stats()["unknown_calls"], 1)
             self.assertEqual({p: file_hash(p) for p in saved_hashes}, saved_hashes)
-            self.assertEqual(cooldown.await_count, 2 if interrupted else 1)
+            self.assertEqual(
+                cooldown.await_count, 2 if interrupted else 0 if refusal else 1
+            )
             summary = report(campaign)
             self.assertTrue(summary["pilot_finished"])
             self.assertEqual(summary["full_trials"], 0)

@@ -160,7 +160,12 @@ uv run --extra openai --extra itbench-aa dowser-bench run \
   --phase pilot --root .local/itbench-aa-prepared-v2 --campaign NEW_CAMPAIGN
 ```
 
-The 30-minute incident watchdog and bounded attempts/retries remain. API access,
+The 30-minute incident watchdog and bounded attempts/retries remain. A native
+model refusal ends that case with score zero; the pilot retains its traces and
+spending and advances to untouched cases without replay. Malformed responses and
+other permanent technical failures still halt the batch.
+
+API access,
 actual accuracy, latency and billed cost require separately authorized paid
 validation; offline mock results do not establish them.
 

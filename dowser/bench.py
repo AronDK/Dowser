@@ -116,6 +116,15 @@ def normalize_report_row(row):
     return row
 
 
+def model_refusal(row):
+    detail = row.get("failure") or {}
+    return (
+        row.get("category") == "provider"
+        and detail.get("category") == "response"
+        and detail.get("code") == "refusal"
+    )
+
+
 def runner_execution_fingerprint(source):
     """Only batch management and reporting can change on an approved resume."""
     management = {
@@ -127,6 +136,7 @@ def runner_execution_fingerprint(source):
         "record_runner_update",
         "failure_category",
         "normalize_report_row",
+        "model_refusal",
     }
     nodes = []
     for node in ast.parse(source).body:
@@ -175,6 +185,7 @@ def record_runner_update(campaign, existing, expected, base, authorized):
     existing["batch_policy"] = {
         "continue_transient_full_failures": True,
         "continue_transient_pilot_failures": True,
+        "continue_model_refusals_in_pilot": True,
         "cooldown_seconds": 60,
     }
     note = "Exhausted transient upstream failures in full-run trials retain zero scores and all spending reservations; the batch continues after a 60-second cooldown without replay. Other technical failures still halt."
@@ -183,6 +194,9 @@ def record_runner_update(campaign, existing, expected, base, authorized):
     pilot_note = "User-authorized pilot continuation retains exhausted transient provider failures with zero score and advances after a 60-second cooldown without replay. Permanent provider, schema and execution failures still halt. Full-run admission remains separately gated."
     if pilot_note not in existing["methodological_differences"]:
         existing["methodological_differences"].append(pilot_note)
+    refusal_note = "Native model refusals retain zero scores, complete API traces and spending; the pilot advances to untouched cases without retrying or replaying the refused selection. Malformed responses and other permanent technical failures still halt."
+    if refusal_note not in existing["methodological_differences"]:
+        existing["methodological_differences"].append(refusal_note)
     atomic_json(campaign / "manifest.json", existing)
 
 
@@ -838,7 +852,9 @@ def report(campaign):
         for detail in diagnostics:
             handle.write(dumps(detail) + "\n")
     summary = {
-        "title": TITLE,
+        "title": TITLE.replace("Dowser/Jev", "Dowser/OpenAI Decisions")
+        if manifest["configuration"].get("provider") == "openai"
+        else TITLE,
         "full_trials": len(full),
         "expected_full_trials": 120,
         "pilot_trials": len(pilot),
@@ -925,7 +941,7 @@ def report(campaign):
         writer.writeheader()
         writer.writerows(completed)
     lines = [
-        f"# {TITLE}",
+        f"# {summary['title']}",
         "",
         f"Campaign: `{campaign.name}`. Full trials: **{len(full)}/120**; pilot trials: **{len(pilot)}/10**.",
         "",
@@ -1126,6 +1142,12 @@ async def run_campaign(
                     flush=True,
                 )
                 report(campaign)
+                if model_refusal(row):
+                    print(
+                        "Model refusal retained with zero score; no replay. Advancing to untouched pilot cases.",
+                        flush=True,
+                    )
+                    continue
                 if continue_interrupted and row["category"] in {
                     "interrupted",
                     "interrupted_with_submission",
@@ -1163,6 +1185,7 @@ async def run_campaign(
                 r["category"]
                 not in {"completed", "abandoned", "call_limit", "deadline"}
                 and not transient_full_failure(r)
+                and not model_refusal(r)
                 and not (
                     continue_interrupted
                     and r["category"] in {"interrupted", "interrupted_with_submission"}
