@@ -218,6 +218,56 @@ class DecisionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(encoded["candidate_string_table"])
         self.assertIn("action_history_default", encoded)
 
+    async def test_description_templates_preserve_literals_and_argument_references(
+        self,
+    ):
+        from dowser.catalogue import encode_catalogue
+
+        values = [candidate(str(i)).model_dump(mode="json") for i in range(20)]
+        for i, value in enumerate(values):
+            value["args"].update(
+                entity=f"namespace/Deployment/entity-{i}",
+                kind="configuration",
+                reason="dependency failure",
+            )
+            value["description"] = (
+                f"Inspect configuration for {value['args']['entity']}; dependency failure; {value['args']['entity']}"
+            )
+        encoded = encode_catalogue(values)
+        self.assertEqual(decode_catalogue(encoded), values)
+        self.assertTrue(encoded["candidate_description_templates"])
+        self.assertTrue(
+            all(type(c["description"]) is int for c in encoded["candidates"])
+        )
+
+    async def test_rate_admission_splits_questions_without_omitting_candidates(self):
+        self.request.candidates = [candidate(f"option-{i:04}") for i in range(1600)]
+        provider = self.provider()
+        shared = provider.input(self.request)
+        from dowser.tokens import estimate
+
+        base = (
+            estimate({"model": "gpt-6-luna", "input": shared, "questions": []})[
+                "estimated_tokens"
+            ]
+            + 64
+        )
+        questions = provider.batches(self.request.candidates)[0]
+        provider.settings.tokens_per_minute = base + sum(
+            estimate(q)["estimated_tokens"] for q in questions[:2]
+        )
+        packed = provider.batches(self.request.candidates, shared=shared)
+        self.assertTrue(all(len(batch) <= 2 for batch in packed))
+        offered = [
+            c["value"]
+            for batch in packed
+            for q in batch
+            for c in q["choices"]
+            if c["value"] != "wait"
+        ]
+        self.assertEqual(len(offered), 1600)
+        self.assertEqual(len(set(offered)), 1600)
+
     async def test_every_candidate_in_grouped_selection_and_final_choice(self):
         self.request.candidates = [candidate(f"option-{i:04}") for i in range(1600)]
         result = await self.provider().decide(self.request)

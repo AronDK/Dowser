@@ -9,6 +9,27 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def description_parts(candidate):
+    parts = [candidate["description"]]
+    for key in ("entity", "kind", "reason"):
+        value = candidate["args"].get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        updated = []
+        for part in parts:
+            if not isinstance(part, str):
+                updated.append(part)
+                continue
+            pieces = part.split(value)
+            for index, piece in enumerate(pieces):
+                if index:
+                    updated.append({"argument": key})
+                if piece:
+                    updated.append(piece)
+        parts = updated
+    return parts
+
+
 def encode_catalogue(candidates):
     groups = {}
     for candidate in candidates:
@@ -63,8 +84,12 @@ def encode_catalogue(candidates):
                     repeated.update(values)
     strings = sorted(repeated)
     string_indices = {value: index for index, value in enumerate(strings)}
+    templates = [description_parts(c) for c in candidates]
+    frequencies = Counter(canonical(parts) for parts in templates)
+    template_keys = sorted(key for key, count in frequencies.items() if count > 1)
+    template_indices = {key: index for index, key in enumerate(template_keys)}
     encoded = []
-    for candidate in candidates:
+    for candidate, template in zip(candidates, templates, strict=True):
         common, arguments = (
             defaults[candidate["tool"]],
             argument_defaults[candidate["tool"]],
@@ -84,6 +109,9 @@ def encode_catalogue(candidates):
                 item["args"][key] = string_indices[item["args"][key]]
         for key, prefix in prefixes.get(candidate["tool"], {}).items():
             item[key] = item[key][len(prefix) :]
+        template_key = canonical(template)
+        if template_key in template_indices:
+            item["description"] = template_indices[template_key]
         encoded.append(item)
     return {
         "catalogue_encoding": "per_tool_defaults/1",
@@ -92,6 +120,7 @@ def encode_catalogue(candidates):
         "candidate_text_prefixes": prefixes,
         "candidate_string_fields": string_fields,
         "candidate_string_table": strings,
+        "candidate_description_templates": [json.loads(key) for key in template_keys],
         "candidates": encoded,
     }
 
@@ -117,6 +146,14 @@ def decode_catalogue(value):
             value.get("candidate_text_prefixes", {}).get(candidate["tool"], {}).items()
         ):
             candidate[key] = prefix + candidate[key]
+        if type(candidate.get("description")) is int:
+            template = value["candidate_description_templates"][
+                candidate["description"]
+            ]
+            candidate["description"] = "".join(
+                part if isinstance(part, str) else candidate["args"][part["argument"]]
+                for part in template
+            )
     return result
 
 

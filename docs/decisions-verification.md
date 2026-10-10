@@ -57,5 +57,14 @@ Receipts, rendered comparison inputs and test logs are in the gitignored
 `.local/decisions-verification-final/` directory. Older verification artifacts and
 campaigns remain preserved.
 
-No paid validation, live API calls or fresh pilot were run. Actual diagnostic
-quality, latency and billing remain unmeasured and require separate authorization.
+The offline verification above made no paid calls. On 2026-10-10 the user
+authorized a fresh ten-case pilot at 500 RPM and 500,000 TPM. A live SDK smoke
+call returned a valid native choice and usage. The pilot uses a new campaign and
+retains watchdog failures and unknown reservations without replay. Live results
+are separate from these offline coverage checks.
+
+Admission fixes for that configuration passed **30 focused tests**, including
+lossless description-template decoding, adaptive question packing without omitted
+candidates, and pilot resume regressions. The effective request budget respects
+both context and TPM limits; preflight checks the requested phase. Ruff lint,
+formatting and whitespace checks passed for these changes.

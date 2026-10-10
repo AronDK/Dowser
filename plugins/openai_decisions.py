@@ -41,6 +41,7 @@ INSTRUCTIONS = (
     " Prepend candidate_text_prefixes[tool][field] to any matching candidate text field to restore it."
     " For fields listed in candidate_string_fields[tool], an integer argument value indexes candidate_string_table and restores the original string."
     " For history, a candidate without an explicit entry has the whole action_history_default record. Explicit records replace that default. A failed lookup never means a new action."
+    " An integer description indexes candidate_description_templates: concatenate literal strings and each argument reference's restored argument string. Compression defaults do not recommend actions."
 )
 
 
@@ -156,20 +157,43 @@ class OpenAIDecisionsProvider(Component):
             + [{"value": WAIT, "description": "Wait briefly; execute no action."}],
         }
 
-    def batches(self, candidates, stage=0):
+    def batches(self, candidates, stage=0, shared=None):
         groups = [candidates[i : i + 254] for i in range(0, len(candidates), 254)]
-        return [
-            [
-                self.question(group, f"stage_{stage}_group_{i + start}")
-                for i, group in enumerate(groups[start : start + 6])
-            ]
-            for start in range(0, len(groups), 6)
+        questions = [
+            self.question(group, f"stage_{stage}_group_{i}")
+            for i, group in enumerate(groups)
         ]
+        if shared is None:
+            return [questions[i : i + 6] for i in range(0, len(questions), 6)]
+        budget = min(
+            self.settings.input_tokens,
+            self.settings.tokens_per_minute or self.settings.input_tokens,
+        )
+        base = (
+            estimate(
+                {"model": self.settings.model, "input": shared, "questions": []},
+                self.settings.model,
+            )["estimated_tokens"]
+            + 64
+        )
+        batches, pending, tokens = [], [], base
+        for question in questions:
+            weight = estimate(question, self.settings.model)["estimated_tokens"]
+            if pending and (len(pending) == 6 or tokens + weight > budget):
+                batches.append(pending)
+                pending, tokens = [], base
+            pending.append(question)
+            tokens += weight
+        if pending:
+            batches.append(pending)
+        return batches
 
     async def check_context(self, request):
         try:
             shared = self.input(request)
-            batches = self.batches(sorted(request.candidates, key=lambda c: c.id))
+            batches = self.batches(
+                sorted(request.candidates, key=lambda c: c.id), shared=shared
+            )
             estimates = [
                 estimate(
                     {
@@ -182,12 +206,17 @@ class OpenAIDecisionsProvider(Component):
                 for questions in batches
             ]
             largest = max(estimates, key=lambda e: e["estimated_tokens"])
+            budget = min(
+                self.settings.input_tokens,
+                self.settings.tokens_per_minute or self.settings.input_tokens,
+            )
             return ContextCheck(
-                fits=largest["estimated_tokens"] <= self.settings.input_tokens,
+                fits=largest["estimated_tokens"] <= budget,
                 reason="estimated rendered Decisions input including catalogue and questions",
                 metadata={
                     **largest,
                     "input_budget": self.settings.input_tokens,
+                    "admission_budget": budget,
                     "context_window": 1050000,
                 },
             )
@@ -572,7 +601,7 @@ class OpenAIDecisionsProvider(Component):
             stage = 0
             while True:
                 winners = []
-                batches = self.batches(menu, stage)
+                batches = self.batches(menu, stage, shared)
                 for questions in batches:
                     answers, metadata = await self.send(
                         request,

@@ -1056,7 +1056,12 @@ async def run_campaign(
         from .models import DecisionRequest, Limits
 
         preflight = []
-        for scenario in prepared["scenarios"]:
+        preflight_scenarios = (
+            [scenario for scenario in PILOT if scenario in prepared["scenarios"]]
+            if phase == "pilot"
+            else prepared["scenarios"]
+        )
+        for scenario in preflight_scenarios:
             settings = Settings(
                 index=prepared["indexes"][f"Scenario-{scenario}"]["path"],
                 scenario=scenario,

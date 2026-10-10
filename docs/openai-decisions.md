@@ -48,9 +48,12 @@ retrieval. The benchmark does this automatically. SQLite remains authoritative.
 
 Menus are sorted deterministically by action ID, partitioned into at most 254
 actions plus wait, and evaluated in batches of at most six independent questions.
+Batch packing also respects configured TPM admission; it sends fewer questions
+when the shared input plus six questions would exceed that allowance.
 Every evaluation receives the same complete catalogue and shared evidence.
-Repeated per-tool fields, text prefixes, repeated argument strings and identical
-history lookup results are encoded losslessly with explicit defaults and tables; decoding restores every candidate field and argument.
+Repeated per-tool fields, text prefixes, repeated argument strings, description
+templates and identical history lookup results are encoded losslessly with explicit
+defaults and tables; decoding restores every candidate field and argument.
 Native choice values always use the actual supplied action IDs. A new
 request selects among group winners and wait; this repeats if necessary. If all
 groups choose wait, that wait is returned directly. Native choices are preserved;
@@ -67,6 +70,12 @@ contradictions remain separate. Original segments, provenance, uncertainty and
 incomplete-page markers survive. Overflow preserves required state and the whole
 catalogue, prioritizes contradictions and alert/focus evidence, and publishes
 omission counts and retrieval queries/references.
+
+The effective per-request budget is the smaller of the configured context budget
+and TPM allowance. Overflow may omit optional evidence with retrieval references;
+the complete catalogue remains required. Pilot preflight checks the ten requested
+cases; full-campaign preflight checks every prepared snapshot. A snapshot fitting
+the model context can still exceed a smaller account admission allowance.
 
 Token accounting is an estimate, never an exact count inferred from bytes.
 Locally installed tokenizer assets are used when available, with the tokenizer
