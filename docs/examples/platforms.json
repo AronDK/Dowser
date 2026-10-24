@@ -6,7 +6,8 @@
     {"factory": "plugins.vllm:tool_plugin", "settings": {
       "inventory_path": "docs/examples/inventory.json",
       "metrics_thresholds": {"queue_max": 4, "cache_max": 0.9, "latency_mean": 2}
-    }}
+    }},
+    {"factory": "plugins.k8s:tool_plugin", "settings": {"inventory_path": "docs/examples/inventory.json"}}
   ]}},
   "context_builder": {"factory": "dowser.core:context_builder"},
   "decision_provider": {"factory": "plugins.vllm:decision_provider", "settings": {

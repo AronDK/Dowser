@@ -14,6 +14,18 @@
         "container": "dowser-vllm-1", "unix_socket": "/var/run/docker.sock",
         "compose_project": "dowser", "compose_service": "vllm"
       }
+    },
+    "k8s-lab": {
+      "platform": "k8s", "platform_version": "v1",
+      "endpoint": "https://k8s.example.net:6443",
+      "token_env": "DOWSER_K8S_TOKEN",
+      "namespaces": ["kube-system", "checkout"],
+      "protected_namespaces": ["kube-system"],
+      "deployments": ["payment"],
+      "pods": ["payment-7c9d8b6f4-abc12"],
+      "services": ["payment"],
+      "nodes": ["worker-1"],
+      "max_replicas": 5
     }
   }
 }

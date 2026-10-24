@@ -65,8 +65,17 @@ class HTTPSettings(Strict):
 
 @asynccontextmanager
 async def http_client(settings, *, unix_socket=None, cert=None):
-    httpx = optional("httpx", "vllm" if isinstance(settings, HTTPSettings) else "nxos")
+    extra = (
+        "k8s"
+        if getattr(settings, "platform", None) == "k8s"
+        else "vllm"
+        if isinstance(settings, HTTPSettings)
+        else "nxos"
+    )
+    httpx = optional("httpx", extra)
     verify = ssl.create_default_context(cafile=settings.ca_file)
+    if cert is None and getattr(settings, "cert_file", None):
+        cert = (settings.cert_file, settings.key_file)
     if cert:
         verify.load_cert_chain(*cert)
     headers = {}
@@ -155,6 +164,10 @@ class DockerTarget(Strict):
         return self
 
 
+K8S_NAME = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+K8S_SUBDOMAIN = r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?"
+
+
 class VLLMService(HTTPSettings):
     platform: Literal["vllm"] = "vllm"
     platform_version: Literal["openai-v1"] = "openai-v1"
@@ -162,20 +175,56 @@ class VLLMService(HTTPSettings):
     docker: DockerTarget | None = None
 
 
+class K8sCluster(HTTPSettings):
+    platform: Literal["k8s"] = "k8s"
+    platform_version: Literal["v1"] = "v1"
+    cert_file: str | None = None
+    key_file: str | None = None
+    namespaces: list[str] = Field(default_factory=list)
+    protected_namespaces: list[str] = Field(default_factory=list)
+    deployments: list[str] = Field(default_factory=list)
+    pods: list[str] = Field(default_factory=list)
+    services: list[str] = Field(default_factory=list)
+    nodes: list[str] = Field(default_factory=list)
+    max_replicas: int = Field(default=10, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def safe(self):
+        endpoint(self.endpoint, https=True)
+        if bool(self.cert_file) != bool(self.key_file):
+            raise ValueError("K8s client TLS requires both cert_file and key_file")
+        if not self.token_env and not self.cert_file:
+            raise ValueError("K8s cluster requires token_env or client certificate")
+        if any(not re.fullmatch(K8S_NAME, x) for x in self.namespaces):
+            raise ValueError("invalid Kubernetes namespace")
+        if not set(self.protected_namespaces) <= set(self.namespaces):
+            raise ValueError("protected namespaces must be in inventory")
+        if any(not re.fullmatch(K8S_SUBDOMAIN, x) for x in self.deployments):
+            raise ValueError("invalid Kubernetes deployment name")
+        if any(not re.fullmatch(K8S_SUBDOMAIN, x) for x in self.pods):
+            raise ValueError("invalid Kubernetes pod name")
+        if any(not re.fullmatch(K8S_NAME, x) for x in self.services):
+            raise ValueError("invalid Kubernetes service name")
+        if any(not re.fullmatch(K8S_SUBDOMAIN, x) for x in self.nodes):
+            raise ValueError("invalid Kubernetes node name")
+        return self
+
+
 class Inventory(Strict):
-    resources: dict[str, NXDevice | VLLMService]
+    resources: dict[str, NXDevice | VLLMService | K8sCluster]
 
     @field_validator("resources", mode="before")
     @classmethod
     def platforms(cls, value):
         if not isinstance(value, dict) or not value:
             raise ValueError("nonempty inventory required")
-        return {
-            key: (
-                NXDevice if item.get("platform") == "nxos" else VLLMService
-            ).model_validate(item)
-            for key, item in value.items()
-        }
+        models = {"nxos": NXDevice, "vllm": VLLMService, "k8s": K8sCluster}
+        result = {}
+        for key, item in value.items():
+            if not isinstance(item, dict) or item.get("platform") not in models:
+                raise ValueError("unknown platform")
+            result[key] = models[item["platform"]].model_validate(item)
+        return result
 
     @classmethod
     def load(cls, path, base_dir):

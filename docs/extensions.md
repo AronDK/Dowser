@@ -266,6 +266,7 @@ persisted by the core. There is no live credential requirement for private valid
 ## Bundled platform adapters
 
 The installable `plugins` package provides NX-OS tools and normalization, a vLLM
-decision provider, managed-vLLM tools and normalization, and a mixed-platform router.
+decision provider, managed-vLLM tools and normalization, Kubernetes tools and
+normalization, and a mixed-platform router.
 See [platform configuration and verification](platforms.md) for factories, optional
 dependencies, inventory scopes, tool catalogues and runnable JSON examples.

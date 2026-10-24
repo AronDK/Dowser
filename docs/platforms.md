@@ -1,6 +1,6 @@
-# NX-OS and vLLM plugins
+# NX-OS, vLLM and Kubernetes plugins
 
-The installed `plugins` package provides six factories. Reuse Dowser's registry,
+The installed `plugins` package provides eight platform factories. Reuse Dowser's registry,
 policy, executor, verifier, loop, SQLite store, JSONL source and scheduler around them.
 
 | Factory | Role |
@@ -10,12 +10,14 @@ policy, executor, verifier, loop, SQLite store, JSONL source and scheduler aroun
 | `plugins.vllm:decision_provider` | SOM adapter with deployment-specific decision capacity |
 | `plugins.vllm:tool_plugin` | Managed vLLM diagnostics and Docker procedures |
 | `plugins.vllm:normalizer` | vLLM-only incident intake |
+| `plugins.k8s:tool_plugin` | Kubernetes diagnostics and scoped deployment remediation |
+| `plugins.k8s:normalizer` | Kubernetes-only incident intake |
 | `plugins.normalizers:platform_normalizer` | Mixed-platform intake router |
 
 ## Install and configure
 
 ```sh
-uv sync --locked --extra nxos --extra vllm
+uv sync --locked --extra nxos --extra vllm --extra k8s
 uv run dowser validate --config docs/examples/platforms.json
 ```
 
@@ -82,6 +84,7 @@ excluded. Unknown top-level data is not copied into facts.
 | --- | --- | --- |
 | NX-OS | `interfaces`, `vlans`, `vrfs`, `prefixes` | `reachable`, `admin_state`, `oper_state`, `access_vlan`, `vlan_exists`, `vlan_state`, `route_present` |
 | vLLM | `models` | `available: true` or `performance: true` |
+| Kubernetes (`k8s`) | `namespaces`, `deployments`, `pods`, `services`, `nodes` | `reachable`, `node_ready`, `pod_phase`, `pod_ready`, `endpoints_ready`, `deployment_available`, `ready_replicas` |
 
 Interface intent requires exactly one scoped physical Ethernet interface; VLAN intent
 requires one VLAN; routing intent requires one IPv4 prefix and VRF. Service intent
@@ -187,6 +190,24 @@ Other application text and model output are never persisted.
 
 [Docker Engine v1.51](https://docs.docker.com/reference/api/engine/version/v1.51/) and
 [vLLM metrics](https://docs.vllm.ai/en/latest/design/metrics/) define these interfaces.
+
+## Kubernetes tools
+
+| Tool | Arguments after `resource_id` | Result |
+| --- | --- | --- |
+| `k8s.inspect_cluster` | none | `/livez` reachability and validated `gitVersion` |
+| `k8s.inspect_node` | `node` | Node `Ready` condition, pressure flags, unschedulable flag, kubelet version |
+| `k8s.inspect_pod` | `namespace`, `pod` | Pod phase, `Ready` condition, total container restarts, `OOMKilled` flag, waiting reasons |
+| `k8s.inspect_deployment` | `namespace`, `deployment` | Generation, observed generation, spec/ready/available/updated/unavailable replicas, `deployment_available` |
+| `k8s.inspect_service` | `namespace`, `service` | Service type, ports, ready/not-ready endpoint addresses, `endpoints_ready` |
+| `k8s.scale_deployment` | `namespace`, `deployment`, `replicas` | Scale a non-protected deployment within `max_replicas`, then await rollout readiness |
+| `k8s.restart_deployment` | `namespace`, `deployment` | Patch `kubectl.kubernetes.io/restartedAt` after fresh failure evidence, then await rollout readiness |
+
+Kubernetes targets require HTTPS with verified TLS (`ca_file` or system store) and either
+`token_env` or paired `cert_file` and `key_file`. Protected namespaces (`protected_namespaces`)
+and paused deployments reject mutations. Container environments, commands, logs and Secrets
+are never read or stored. Mutations require an acknowledged HTTP `200` response and consecutive
+rollout readiness checks (`readiness_checks`, default 3) before passing verification.
 
 ## Opting into changes
 

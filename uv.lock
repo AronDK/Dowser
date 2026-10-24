@@ -365,6 +365,9 @@ jev = [
     { name = "httpx" },
     { name = "python-dotenv" },
 ]
+k8s = [
+    { name = "httpx" },
+]
 nxos = [
     { name = "asyncssh" },
     { name = "httpx" },
@@ -389,6 +392,7 @@ vllm = [
 requires-dist = [
     { name = "asyncssh", marker = "extra == 'nxos'", specifier = ">=2.20,<3" },
     { name = "httpx", marker = "extra == 'jev'", specifier = ">=0.28,<1" },
+    { name = "httpx", marker = "extra == 'k8s'", specifier = ">=0.28,<1" },
     { name = "httpx", marker = "extra == 'nxos'", specifier = ">=0.28,<1" },
     { name = "httpx", marker = "extra == 'vllm'", specifier = ">=0.28,<1" },
     { name = "huggingface-hub", marker = "extra == 'itbench-aa'", specifier = ">=1.0,<2" },
@@ -404,7 +408,7 @@ requires-dist = [
     { name = "tiktoken", marker = "extra == 'openai'", specifier = ">=0.12,<1" },
     { name = "tiktoken", marker = "extra == 'semantic-memory'", specifier = ">=0.12,<1" },
 ]
-provides-extras = ["openai", "semantic-memory", "jev", "itbench-aa", "nxos", "vllm"]
+provides-extras = ["openai", "semantic-memory", "jev", "itbench-aa", "nxos", "vllm", "k8s"]
 
 [[package]]
 name = "filelock"

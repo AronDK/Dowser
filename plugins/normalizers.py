@@ -21,7 +21,7 @@ class PlatformNormalizer(Component):
         if not isinstance(data, dict):
             raise ValueError("platform incident must be an object")
         platform = data.get("platform")
-        if platform not in {"nxos", "vllm"} or (
+        if platform not in {"nxos", "vllm", "k8s"} or (
             self.platform and platform != self.platform
         ):
             raise ValueError("unknown platform")
@@ -57,6 +57,8 @@ class PlatformNormalizer(Component):
         allowed_fields = (
             ("interfaces", "vlans", "vrfs", "prefixes")
             if platform == "nxos"
+            else ("namespaces", "deployments", "pods", "services", "nodes")
+            if platform == "k8s"
             else ("models",)
         )
         if not isinstance(scope, dict) or set(scope) - set(allowed_fields):
@@ -116,6 +118,16 @@ class PlatformNormalizer(Component):
                 "reachable",
             }
             if platform == "nxos"
+            else {
+                "reachable",
+                "node_ready",
+                "pod_phase",
+                "pod_ready",
+                "endpoints_ready",
+                "deployment_available",
+                "ready_replicas",
+            }
+            if platform == "k8s"
             else {"available", "performance"}
         )
         if set(desired) - fields:
@@ -154,6 +166,48 @@ class PlatformNormalizer(Component):
             for key in ("route_present", "vlan_exists", "reachable"):
                 if key in desired and type(desired[key]) is not bool:
                     raise ValueError("expected boolean desired state")
+        elif platform == "k8s":
+            if set(desired) & {"deployment_available", "ready_replicas"} and (
+                len(scope.get("namespaces", [])) != 1
+                or len(scope.get("deployments", [])) != 1
+            ):
+                raise ValueError(
+                    "deployment desired state requires one scoped namespace and deployment"
+                )
+            if set(desired) & {"pod_phase", "pod_ready"} and (
+                len(scope.get("namespaces", [])) != 1 or len(scope.get("pods", [])) != 1
+            ):
+                raise ValueError(
+                    "pod desired state requires one scoped namespace and pod"
+                )
+            if "endpoints_ready" in desired and (
+                len(scope.get("namespaces", [])) != 1
+                or len(scope.get("services", [])) != 1
+            ):
+                raise ValueError(
+                    "service desired state requires one scoped namespace and service"
+                )
+            if "node_ready" in desired and len(scope.get("nodes", [])) != 1:
+                raise ValueError("node desired state requires one scoped node")
+            if "pod_phase" in desired and desired["pod_phase"] not in {
+                "Running",
+                "Succeeded",
+            }:
+                raise ValueError("unsupported pod phase")
+            if "ready_replicas" in desired and (
+                type(desired["ready_replicas"]) is not int
+                or not 1 <= desired["ready_replicas"] <= 100
+            ):
+                raise ValueError("expected positive integer desired ready_replicas")
+            for key in (
+                "reachable",
+                "node_ready",
+                "pod_ready",
+                "endpoints_ready",
+                "deployment_available",
+            ):
+                if key in desired and type(desired[key]) is not bool:
+                    raise ValueError("expected boolean Kubernetes desired state")
         else:
             if desired and len(scope.get("models", [])) != 1:
                 raise ValueError("service desired state requires one scoped model")

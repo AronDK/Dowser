@@ -25,6 +25,13 @@
             },
             "enable_changes": true
           }
+        },
+        {
+          "factory": "plugins.k8s:tool_plugin",
+          "settings": {
+            "inventory_path": "docs/examples/inventory.json",
+            "enable_changes": true
+          }
         }
       ]
     }
@@ -51,7 +58,8 @@
       "allow_changes": true,
       "allowed_resources": [
         "nexus-lab",
-        "inference-lab"
+        "inference-lab",
+        "k8s-lab"
       ]
     }
   },

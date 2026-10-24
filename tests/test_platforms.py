@@ -26,7 +26,7 @@ from dowser.models import (
     now,
 )
 from dowser.store import reject_credentials
-from plugins import nxos, vllm
+from plugins import k8s, nxos, vllm
 from plugins.common import Inventory, InventorySettings, ToolSettings, optional
 from plugins.normalizers import PlatformNormalizer
 
@@ -282,6 +282,160 @@ def metric_text(count=10, seconds=10, queue=1, cache=0.5, model="som", engine="0
     )
 
 
+class FakeK8s:
+    def __init__(self):
+        self.calls = []
+        self.livez_status = 200
+        self.git_version = "v1.31.2"
+        self.outage = False
+        self.lost_mutation = False
+        self.mutation_status = 200
+        self.readiness_sequence = []
+        self.node = {
+            "metadata": {"name": "worker-1"},
+            "spec": {"unschedulable": False},
+            "status": {
+                "conditions": [
+                    {"type": "Ready", "status": "True"},
+                    {"type": "MemoryPressure", "status": "False"},
+                    {"type": "DiskPressure", "status": "False"},
+                    {"type": "PIDPressure", "status": "False"},
+                ],
+                "nodeInfo": {"kubeletVersion": "v1.31.2"},
+            },
+        }
+        self.pod = {
+            "metadata": {"namespace": "checkout", "name": "payment-7c9d8b6f4-abc12"},
+            "spec": {
+                "containers": [
+                    {
+                        "name": "payment",
+                        "env": [{"name": "API_KEY", "value": "never-store"}],
+                    }
+                ]
+            },
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "False"}],
+                "containerStatuses": [
+                    {
+                        "name": "payment",
+                        "restartCount": 3,
+                        "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+                        "lastState": {"terminated": {"reason": "OOMKilled"}},
+                    }
+                ],
+            },
+        }
+        self.deployment = {
+            "metadata": {
+                "namespace": "checkout",
+                "name": "payment",
+                "generation": 2,
+                "secret": "never-store",
+            },
+            "spec": {"replicas": 2, "paused": False},
+            "status": {
+                "observedGeneration": 2,
+                "readyReplicas": 0,
+                "availableReplicas": 0,
+                "updatedReplicas": 2,
+                "unavailableReplicas": 2,
+                "conditions": [{"type": "Available", "status": "False"}],
+            },
+        }
+        self.service = {
+            "metadata": {"namespace": "checkout", "name": "payment"},
+            "spec": {"type": "ClusterIP", "ports": [{"port": 8080}]},
+        }
+        self.endpoints = {
+            "metadata": {"namespace": "checkout", "name": "payment"},
+            "subsets": [
+                {
+                    "addresses": [{"ip": "10.244.0.10"}],
+                    "notReadyAddresses": [{"ip": "10.244.0.11"}],
+                }
+            ],
+        }
+
+    @asynccontextmanager
+    async def client(self, cluster):
+        yield self
+
+    async def get(self, path):
+        self.calls.append(("GET", path, None))
+        if self.outage:
+            raise ConnectionError("token=secret")
+        if path == "/livez":
+            return Response(status=self.livez_status)
+        if path == "/version":
+            return Response({"gitVersion": self.git_version})
+        if path == "/api/v1/nodes/worker-1":
+            return Response(self.node)
+        if path == "/api/v1/namespaces/checkout/pods/payment-7c9d8b6f4-abc12":
+            return Response(self.pod)
+        if path in (
+            "/apis/apps/v1/namespaces/checkout/deployments/payment",
+            "/apis/apps/v1/namespaces/kube-system/deployments/payment",
+        ):
+            dep = copy.deepcopy(self.deployment)
+            if path.startswith("/apis/apps/v1/namespaces/kube-system/"):
+                dep["metadata"]["namespace"] = "kube-system"
+            if self.readiness_sequence:
+                ready = self.readiness_sequence.pop(0)
+                replicas = dep["spec"]["replicas"]
+                dep["status"].update(
+                    observedGeneration=dep["metadata"]["generation"],
+                    readyReplicas=replicas if ready else 0,
+                    availableReplicas=replicas if ready else 0,
+                    updatedReplicas=replicas,
+                    unavailableReplicas=0 if ready else replicas,
+                    conditions=[
+                        {"type": "Available", "status": "True" if ready else "False"}
+                    ],
+                )
+            return Response(dep)
+        if path == "/api/v1/namespaces/checkout/services/payment":
+            return Response(self.service)
+        if path == "/api/v1/namespaces/checkout/endpoints/payment":
+            return Response(self.endpoints)
+        raise AssertionError(path)
+
+    async def patch(self, path, **kwargs):
+        body = kwargs.get("json")
+        self.calls.append(("PATCH", path, body))
+        if self.outage or self.lost_mutation:
+            raise ConnectionError("lost k8s mutation")
+        if path.endswith("/scale"):
+            replicas = body["spec"]["replicas"]
+            self.deployment["spec"]["replicas"] = replicas
+            self.deployment["status"].update(
+                observedGeneration=self.deployment["metadata"]["generation"],
+                readyReplicas=replicas,
+                availableReplicas=replicas,
+                updatedReplicas=replicas,
+                unavailableReplicas=0,
+                conditions=[{"type": "Available", "status": "True"}],
+            )
+            return Response(
+                {"spec": {"replicas": replicas}}, status=self.mutation_status
+            )
+        if path == "/apis/apps/v1/namespaces/checkout/deployments/payment":
+            gen = self.deployment["metadata"]["generation"] + 1
+            self.deployment["metadata"]["generation"] = gen
+            replicas = self.deployment["spec"]["replicas"]
+            self.deployment["status"].update(
+                observedGeneration=gen,
+                readyReplicas=replicas,
+                availableReplicas=replicas,
+                updatedReplicas=replicas,
+                unavailableReplicas=0,
+                conditions=[{"type": "Available", "status": "True"}],
+            )
+            return Response(self.deployment, status=self.mutation_status)
+        raise AssertionError(path)
+
+
 class Platforms(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -292,6 +446,7 @@ class Platforms(unittest.IsolatedAsyncioTestCase):
         self.context = AppContext({}, Limits(freshness_seconds=60), self.base)
         self.nx = FakeNX()
         self.http = FakeHTTP()
+        self.k8s = FakeK8s()
         self.socket_patch = patch.object(
             socket.socket, "connect", side_effect=AssertionError("network forbidden")
         )
@@ -305,8 +460,20 @@ class Platforms(unittest.IsolatedAsyncioTestCase):
         self.path.write_text(json.dumps(self.inventory))
 
     def plugin(self, *, platform="nxos", changes=False, **kwargs):
-        model = ToolSettings if platform == "nxos" else vllm.ServiceSettings
-        cls = nxos.NXOSTools if platform == "nxos" else vllm.VLLMTools
+        model = (
+            ToolSettings
+            if platform == "nxos"
+            else k8s.K8sSettings
+            if platform == "k8s"
+            else vllm.ServiceSettings
+        )
+        cls = (
+            nxos.NXOSTools
+            if platform == "nxos"
+            else k8s.K8sTools
+            if platform == "k8s"
+            else vllm.VLLMTools
+        )
         return cls(
             model(inventory_path="inventory.json", enable_changes=changes, **kwargs),
             self.context,
@@ -322,6 +489,14 @@ class Platforms(unittest.IsolatedAsyncioTestCase):
                     "prefixes": ["192.0.2.0/24"],
                 }
                 if platform == "nxos"
+                else {
+                    "namespaces": ["checkout"],
+                    "deployments": ["payment"],
+                    "pods": ["payment-7c9d8b6f4-abc12"],
+                    "services": ["payment"],
+                    "nodes": ["worker-1"],
+                }
+                if platform == "k8s"
                 else {"models": ["som"]}
             )
         return await PlatformNormalizer(
@@ -337,6 +512,8 @@ class Platforms(unittest.IsolatedAsyncioTestCase):
                     "platform": platform,
                     "resource_id": "nexus-lab"
                     if platform == "nxos"
+                    else "k8s-lab"
+                    if platform == "k8s"
                     else "inference-lab",
                     "alert": {
                         "severity": "major",
@@ -347,6 +524,8 @@ class Platforms(unittest.IsolatedAsyncioTestCase):
                     if desired is not None
                     else {"admin_state": "up"}
                     if platform == "nxos"
+                    else {"deployment_available": True}
+                    if platform == "k8s"
                     else {"available": True},
                     "scope": scope,
                 },
@@ -397,9 +576,20 @@ class Platforms(unittest.IsolatedAsyncioTestCase):
                 resource_id=state.resources[0].id,
                 kind="nxos.inspect_interface"
                 if platform == "nxos"
+                else "k8s.inspect_deployment"
+                if platform == "k8s"
                 else "vllm.inspect_runtime",
                 payload={"interface": "Ethernet1/1", "admin_state": "down"}
                 if platform == "nxos"
+                else {
+                    "namespace": "checkout",
+                    "deployment": "payment",
+                    "spec_replicas": 2,
+                    "ready_replicas": 0,
+                    "unavailable_replicas": 2,
+                    "deployment_available": False,
+                }
+                if platform == "k8s"
                 else {"running": False},
             )
         )
@@ -431,6 +621,8 @@ class Platforms(unittest.IsolatedAsyncioTestCase):
             "plugins.nxos:normalizer",
             "plugins.vllm:tool_plugin",
             "plugins.vllm:normalizer",
+            "plugins.k8s:tool_plugin",
+            "plugins.k8s:normalizer",
             "plugins.normalizers:platform_normalizer",
         ):
             slot = "tool_plugin" if name.endswith("tool_plugin") else "normalizer"
@@ -447,6 +639,7 @@ class Platforms(unittest.IsolatedAsyncioTestCase):
         with patch.object(importlib, "import_module", side_effect=ImportError):
             for name, extra in (
                 ("httpx", "vllm"),
+                ("httpx", "k8s"),
                 ("asyncssh", "nxos"),
                 ("prometheus_client.parser", "vllm"),
             ):
@@ -1000,7 +1193,7 @@ class Platforms(unittest.IsolatedAsyncioTestCase):
             vllm.metric_sample(metric_text(cache=float("nan")), "som")
 
     async def test_default_changes_disabled(self):
-        for platform in ("nxos", "vllm"):
+        for platform in ("nxos", "vllm", "k8s"):
             plugin, state = (
                 self.plugin(platform=platform),
                 await self.with_evidence(platform),
@@ -1085,7 +1278,9 @@ class Platforms(unittest.IsolatedAsyncioTestCase):
         )
         states = [await normalizer.normalize(record) async for record in iterator]
         await source.aclose()
-        self.assertEqual([s.resources[0].platform for s in states], ["nxos", "vllm"])
+        self.assertEqual(
+            [s.resources[0].platform for s in states], ["nxos", "vllm", "k8s"]
+        )
         cfg = read_config(ROOT / "docs/examples/platforms.json")
         cfg.event_store.settings = {"path": str(self.base / "history.sqlite3")}
         cfg.normalizer.settings = {"inventory_path": "inventory.json"}
@@ -1110,7 +1305,7 @@ class Platforms(unittest.IsolatedAsyncioTestCase):
                         on_diagnostic=lambda d: None,
                     ).run()
                 )
-                self.assertEqual(len(results), 2)
+                self.assertEqual(len(results), 3)
                 count = len(self.http.calls)
             async with Application(cfg, self.base) as app:
                 self.assertTrue(
@@ -1448,6 +1643,195 @@ class Platforms(unittest.IsolatedAsyncioTestCase):
             len([s for s in transport.steps if s.step_id.startswith("read-")]), 4
         )
         self.assertIsNone(transport.raw_output["facts"]["access_vlan"])
+
+    async def test_k8s_inventory_and_normalizer_validation(self):
+        for changes in (
+            {"endpoint": "http://k8s.example.net:6443"},
+            {"token_env": None, "cert_file": None, "key_file": None},
+            {"cert_file": "client.crt", "key_file": None},
+            {"namespaces": ["Invalid_NS"]},
+            {"protected_namespaces": ["unlisted"]},
+            {"deployments": ["../escape"]},
+            {"pods": ["bad/pod"]},
+            {"services": ["bad.service"]},
+            {"nodes": ["bad/node"]},
+            {"max_replicas": 0},
+        ):
+            value = copy.deepcopy(self.inventory)
+            value["resources"]["k8s-lab"].update(changes)
+            with self.assertRaises(ValueError):
+                Inventory.model_validate(value)
+        for desired, scope in (
+            ({"deployment_available": True}, {"namespaces": ["checkout"]}),
+            ({"pod_ready": True}, {"namespaces": ["checkout"], "pods": []}),
+            ({"endpoints_ready": True}, {"namespaces": ["checkout"]}),
+            ({"node_ready": True}, {"nodes": []}),
+            (
+                {"pod_phase": "Failed"},
+                {"namespaces": ["checkout"], "pods": ["payment-7c9d8b6f4-abc12"]},
+            ),
+            (
+                {"ready_replicas": 0},
+                {"namespaces": ["checkout"], "deployments": ["payment"]},
+            ),
+            ({"unknown_fact": True}, {"namespaces": ["checkout"]}),
+        ):
+            with self.assertRaises(ValueError):
+                await self.state("k8s", desired=desired, scope=scope)
+
+    async def test_k8s_reads_sanitized_facts_and_hints(self):
+        plugin = self.plugin(platform="k8s")
+        state = await self.state("k8s", desired={})
+        candidates = await plugin.candidates(state)
+        hints = await plugin.memory_query_hints(state, candidates)
+        self.assertEqual(len(hints), 4)
+        self.assertTrue(all(h.source == "k8s" and h.entity == "k8s-lab" for h in hints))
+        with patch.object(k8s, "k8s_client", self.k8s.client):
+            for tool, args in (
+                ("inspect_cluster", {}),
+                ("inspect_node", {"node": "worker-1"}),
+                (
+                    "inspect_pod",
+                    {"namespace": "checkout", "pod": "payment-7c9d8b6f4-abc12"},
+                ),
+                (
+                    "inspect_deployment",
+                    {"namespace": "checkout", "deployment": "payment"},
+                ),
+                (
+                    "inspect_service",
+                    {"namespace": "checkout", "service": "payment"},
+                ),
+            ):
+                c = plugin.candidate(tool, {"resource_id": "k8s-lab", **args})
+                transport, result = await self.executed(plugin, c, state)
+                self.assertEqual(transport.status, "succeeded")
+                self.assertEqual(result.parse.status, "valid")
+                self.assertNotIn("never-store", transport.model_dump_json())
+                self.assertNotIn("API_KEY", transport.model_dump_json())
+                self.assertEqual(
+                    (await plugin.verify(state, c, result)).status, "inconclusive"
+                )
+            pod_c = plugin.candidate(
+                "inspect_pod",
+                {
+                    "resource_id": "k8s-lab",
+                    "namespace": "checkout",
+                    "pod": "payment-7c9d8b6f4-abc12",
+                },
+            )
+            transport, _ = await self.executed(plugin, pod_c, state)
+            facts = transport.raw_output["facts"]
+            self.assertTrue(facts["oom_killed"])
+            self.assertEqual(facts["restart_count"], 3)
+            self.assertEqual(facts["waiting_reasons"], ["CrashLoopBackOff"])
+
+    async def test_k8s_restart_and_scale_rollout_readiness_and_verification(self):
+        plugin = self.plugin(
+            platform="k8s",
+            changes=True,
+            rollout_seconds=0.5,
+            readiness_interval=0.001,
+        )
+        state = await self.with_evidence("k8s")
+        restart = plugin.candidate(
+            "restart_deployment",
+            {
+                "resource_id": "k8s-lab",
+                "namespace": "checkout",
+                "deployment": "payment",
+            },
+            [state.observations[0].id],
+        )
+        self.k8s.readiness_sequence = [False, True, False, True, True, True]
+        with patch.object(k8s, "k8s_client", self.k8s.client):
+            self.assertTrue((await plugin.validate(restart, state)).allowed)
+            transport, result = await self.executed(plugin, restart, state)
+        self.assertEqual(transport.status, "succeeded")
+        self.assertEqual((await plugin.verify(state, restart, result)).status, "passed")
+        self.assertEqual(transport.raw_output["facts"]["readiness_checks"], 3)
+        scale_state = await self.with_evidence("k8s", desired={"ready_replicas": 4})
+        scale = plugin.candidate(
+            "scale_deployment",
+            {
+                "resource_id": "k8s-lab",
+                "namespace": "checkout",
+                "deployment": "payment",
+                "replicas": 4,
+            },
+            [scale_state.observations[0].id],
+        )
+        with patch.object(k8s, "k8s_client", self.k8s.client):
+            self.assertTrue((await plugin.validate(scale, scale_state)).allowed)
+            transport, result = await self.executed(plugin, scale, scale_state)
+        self.assertEqual(transport.status, "succeeded")
+        self.assertEqual(
+            (await plugin.verify(scale_state, scale, result)).status, "passed"
+        )
+        self.assertEqual(transport.raw_output["facts"]["ready_replicas"], 4)
+
+    async def test_k8s_protected_namespace_lost_ack_and_partial_rollout(self):
+        plugin = self.plugin(
+            platform="k8s",
+            changes=True,
+            rollout_seconds=0.01,
+            readiness_interval=0.002,
+        )
+        protected_state = await self.state(
+            "k8s",
+            desired={"deployment_available": True},
+            scope={"namespaces": ["kube-system"], "deployments": ["payment"]},
+        )
+        protected_state.observations.append(
+            Observation(
+                resource_id="k8s-lab",
+                kind="k8s.inspect_deployment",
+                payload={
+                    "namespace": "kube-system",
+                    "deployment": "payment",
+                    "spec_replicas": 2,
+                    "ready_replicas": 0,
+                    "unavailable_replicas": 2,
+                    "deployment_available": False,
+                },
+            )
+        )
+        self.assertFalse(
+            any(c.effect == "change" for c in await plugin.candidates(protected_state))
+        )
+        forged = plugin.candidate(
+            "restart_deployment",
+            {
+                "resource_id": "k8s-lab",
+                "namespace": "kube-system",
+                "deployment": "payment",
+            },
+        )
+        with patch.object(k8s, "k8s_client", self.k8s.client):
+            self.assertFalse((await plugin.validate(forged, protected_state)).allowed)
+            self.assertEqual(
+                (await plugin.execute(forged, protected_state)).status, "failed"
+            )
+        state = await self.with_evidence("k8s")
+        restart = plugin.candidate(
+            "restart_deployment",
+            {
+                "resource_id": "k8s-lab",
+                "namespace": "checkout",
+                "deployment": "payment",
+            },
+        )
+        self.k8s.readiness_sequence = [False] * 20
+        with patch.object(k8s, "k8s_client", self.k8s.client):
+            transport, result = await self.executed(plugin, restart, state)
+            self.assertEqual(transport.status, "partial")
+            self.assertEqual(
+                (await plugin.verify(state, restart, result)).status, "inconclusive"
+            )
+        self.k8s.lost_mutation = True
+        with patch.object(k8s, "k8s_client", self.k8s.client):
+            transport = await plugin.execute(restart, state)
+            self.assertEqual(transport.status, "unknown")
 
     async def test_cli_configuration_compatibility(self):
         result = subprocess.run(

@@ -50,6 +50,8 @@ class PlatformTools(Component):
         keys = (
             ("interfaces", "vlans", "vrfs", "prefixes")
             if self.platform == "nxos"
+            else ("namespaces", "deployments", "pods", "services", "nodes")
+            if self.platform == "k8s"
             else ("models",)
         )
         if not isinstance(scope, dict) or set(scope) - set(keys):
@@ -65,6 +67,11 @@ class PlatformTools(Component):
             ("vrf", "vrfs"),
             ("prefix", "prefixes"),
             ("model", "models"),
+            ("namespace", "namespaces"),
+            ("deployment", "deployments"),
+            ("pod", "pods"),
+            ("service", "services"),
+            ("node", "nodes"),
         ):
             value = getattr(args, arg, None)
             if value is not None and (
@@ -91,7 +98,7 @@ class PlatformTools(Component):
             resources=[args["resource_id"]],
             required_observation_ids=list(evidence),
             timeout_seconds=360
-            if spec.effect == "change" and self.platform == "vllm"
+            if spec.effect == "change" and self.platform in {"vllm", "k8s"}
             else 60,
             verification=spec.verification_hooks[0],
         )

@@ -3,8 +3,8 @@
 An extensible Python harness for incident investigation, validated actions, and
 verification, with SQLite history. Read the [architecture blog](https://akeness.dev/).
 
-The core Python package lives in `dowser/`. The `plugins/` package includes NX-OS diagnostics, restricted interface fixes, and
-vLLM decision-provider and managed-service adapters. See the [platform guide](docs/platforms.md).
+The core Python package lives in `dowser/`. The `plugins/` package includes NX-OS diagnostics, restricted interface fixes,
+Kubernetes cluster/workload diagnostics and deployment remediation, and vLLM decision-provider and managed-service adapters. See the [platform guide](docs/platforms.md).
 
 The optional [OpenAI Decisions provider](docs/openai-decisions.md) and
 [Jev provider](docs/jev.md) support the [ITBench-AA public-subset evaluation](docs/itbench-aa.md)
