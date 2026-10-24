@@ -10,6 +10,9 @@ The optional [OpenAI Decisions provider](docs/openai-decisions.md) and
 [Jev provider](docs/jev.md) support the [ITBench-AA public-subset evaluation](docs/itbench-aa.md)
 through `dowser-bench`. Decisions uses native `gpt-6-luna` choices, queryable SQLite
 history, repeatable authorized actions and optional large cumulative context.
+Opt-in [semantic and graph memory](docs/semantic-memory.md) automatically retrieves
+admitted evidence using OpenAI embeddings and an in-memory Qdrant index while
+retaining SQLite execution durability.
 
 ## Install
 

@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from dowser.assessments import (
     AssessmentResult,
@@ -20,7 +20,7 @@ from dowser.catalogue import encode_action_history, encode_catalogue
 from dowser.contracts import Component, factory
 from dowser.diagnostics import DiagnosticError, failure_details
 from dowser.models import Boundary, ContextCheck, DecisionCapabilities, DecisionResult
-from dowser.rate_limit import RateLimiter
+from dowser.rate_limit import RateLimiter, UnlimitedRateLimiter
 from dowser.runtime import call_deadline, worker_result
 from dowser.store import reject_credentials
 from dowser.tokens import estimate
@@ -56,6 +56,9 @@ class OpenAISettings(Boundary):
     input_tokens: int = Field(default=1000000, ge=1024, le=1000000)
     requests_per_minute: int | None = Field(default=None, ge=1)
     tokens_per_minute: int | None = Field(default=None, ge=1)
+    unlimited_account_limits: bool = False
+    account_requests_per_minute: int | None = Field(default=None, ge=1)
+    account_tokens_per_minute: int | None = Field(default=None, ge=1)
     decision_timeout_seconds: float | None = Field(
         default=None, gt=0, allow_inf_nan=False
     )
@@ -65,6 +68,24 @@ class OpenAISettings(Boundary):
     retry_max_seconds: float = Field(default=5, gt=0, le=60, allow_inf_nan=False)
     wait_seconds: float = Field(default=1, gt=0, allow_inf_nan=False)
     regional_processing: bool = False
+
+    @model_validator(mode="after")
+    def account_limits_pair(self):
+        if self.unlimited_account_limits and any(
+            value is not None
+            for value in (
+                self.requests_per_minute,
+                self.tokens_per_minute,
+                self.account_requests_per_minute,
+                self.account_tokens_per_minute,
+            )
+        ):
+            raise ValueError("unlimited admission cannot also specify account caps")
+        if (self.account_requests_per_minute is None) != (
+            self.account_tokens_per_minute is None
+        ):
+            raise ValueError("combined account RPM and TPM must be configured together")
+        return self
 
 
 class DecisionsError(DiagnosticError):
@@ -381,7 +402,7 @@ class OpenAIDecisionsProvider(Component):
                 category="configuration",
                 stage="preparation",
             )
-        if (
+        if not self.settings.unlimited_account_limits and (
             self.settings.requests_per_minute is None
             or self.settings.tokens_per_minute is None
         ):
@@ -392,12 +413,30 @@ class OpenAIDecisionsProvider(Component):
                 stage="preparation",
             )
         if self.rate_limiter is None:
-            self.rate_limiter = RateLimiter(
-                self.settings.requests_per_minute,
-                self.settings.tokens_per_minute,
-                window_seconds=60,
+            self.rate_limiter = (
+                UnlimitedRateLimiter()
+                if self.settings.unlimited_account_limits
+                else RateLimiter(
+                    self.settings.requests_per_minute,
+                    self.settings.tokens_per_minute,
+                    window_seconds=60,
+                )
             )
         key = self.credential()
+        account_limiter = None
+        if (
+            self.settings.account_requests_per_minute is not None
+            and self.settings.account_tokens_per_minute is not None
+        ):
+            from dowser.memory import digest
+            from dowser.rate_limit import shared_rate_limiter
+
+            account_limiter = shared_rate_limiter(
+                ("openai-account", digest(key)),
+                self.settings.account_requests_per_minute,
+                self.settings.account_tokens_per_minute,
+                window_seconds=60,
+            )
         if key in json.dumps(payload, ensure_ascii=False):
             raise DecisionsError(
                 "Credential in model input",
@@ -430,6 +469,11 @@ class OpenAIDecisionsProvider(Component):
                 )
             for attempt in range(1, self.settings.max_retries + 2):
                 ticket = await self.rate_limiter.acquire(reservation_tokens, deadline)
+                account_ticket = (
+                    await account_limiter.acquire(reservation_tokens, deadline)
+                    if account_limiter
+                    else None
+                )
                 call_id = None
                 try:
                     if self.accounting:
@@ -497,6 +541,11 @@ class OpenAIDecisionsProvider(Component):
                         self.rate_limiter.reconcile(
                             ticket, usage["input_tokens"] + usage["output_tokens"]
                         )
+                        if account_ticket:
+                            account_limiter.reconcile(
+                                account_ticket,
+                                usage["input_tokens"] + usage["output_tokens"],
+                            )
                         if self.accounting:
                             self.accounting.success(
                                 call_id, usage, time.monotonic() - started

@@ -348,12 +348,7 @@ class SQLiteStore(HistoryProjection, AuditJournal, Component):
                 raise ValueError("memory lookup changed incident scope")
             # Also supports assembling a related new alert before it is ingested.
             scope = scope[0] if scope else scope_key(state)
-            incidents = [
-                r[0]
-                for r in self.connection.execute(
-                    "SELECT incident_id FROM memory_scopes WHERE scope=?", (scope,)
-                )
-            ]
+            incidents = self._memory_incidents(state.incident_id, scope)
             if not incidents:
                 return {
                     "facts": [],
@@ -482,6 +477,14 @@ class SQLiteStore(HistoryProjection, AuditJournal, Component):
             "historical": any(f["historical"] for f in selected)
             or any(a["historical"] for a in recent),
         }
+
+    def _memory_incidents(self, incident, scope):
+        return [
+            row[0]
+            for row in self.connection.execute(
+                "SELECT incident_id FROM memory_scopes WHERE scope=?", (scope,)
+            )
+        ]
 
     async def observations(self, incident_id, ids):
         """Retrieve only required admitted observations in this incident."""

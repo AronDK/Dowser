@@ -1,5 +1,12 @@
 # Extension contracts and configuration
 
+The optional [semantic memory profile](semantic-memory.md) replaces memory
+selection with in-memory vector/graph retrieval. Use
+`dowser.semantic_store:semantic_store`, context `profile: semantic`, and optional
+`plugins.semantic_memory:tool_plugin`. The eight mandatory execution slots and
+durable SQLite event-store contract remain unchanged. Platform plugins may provide
+async `memory_query_hints(state, candidates)` returning `MemoryQueryIntent` values.
+
 ## Factories
 
 The eight execution slots remain mandatory in the version 1 JSON configuration.

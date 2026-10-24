@@ -11,6 +11,7 @@ dependencies = ["pydantic>=2.10,<3"]
 
 [project.optional-dependencies]
 openai = ["openai>=3.26.0,<4", "tiktoken>=0.12,<1", "python-dotenv>=1.0,<2"]
+semantic-memory = ["qdrant-client>=1.16,<2", "openai>=3.26.0,<4", "tiktoken>=0.12,<1", "python-dotenv>=1.0,<2"]
 jev = ["httpx>=0.28,<1", "python-dotenv>=1.0,<2"]
 itbench-aa = ["huggingface-hub>=1.0,<2", "PyYAML>=6,<7"]
 nxos = ["httpx>=0.28,<1", "asyncssh>=2.20,<3"]
@@ -22,6 +23,9 @@ dowser-bench = "dowser.bench:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["dowser", "plugins"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["dowser", "plugins", "tests", "docs", "README.md", "AGENTS.md", "pyproject.toml", "uv.lock", ".gitignore", ".env.example"]
 
 [tool.uv]
 package = true

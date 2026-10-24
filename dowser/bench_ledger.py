@@ -50,6 +50,7 @@ class Ledger:
                 "token_ceiling": "INTEGER NOT NULL DEFAULT 64000",
                 "long_context_threshold": "INTEGER",
                 "long_context_multiplier": "INTEGER NOT NULL DEFAULT 1",
+                "input_price": "INTEGER",
             }.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE calls ADD COLUMN {name} {definition}")
@@ -153,6 +154,7 @@ class Ledger:
         endpoint="/v1/decisions",
         long_context_threshold=None,
         long_context_multiplier=1,
+        input_price=None,
     ):
         if type(tokens) is not int or not 0 <= tokens <= token_ceiling:
             raise ValueError("invalid context-sized reservation")
@@ -177,11 +179,14 @@ class Ledger:
                 and tokens > long_context_threshold
                 else 1
             )
-            amount = tokens * self.price * multiplier
+            price = self.price if input_price is None else input_price
+            if type(price) is not int or price < 0:
+                raise ValueError("invalid input price")
+            amount = tokens * price * multiplier
             if self.budget is not None and spent + amount > self.budget:
                 raise SpendingLimit("campaign spending ceiling reached")
             return db.execute(
-                "INSERT INTO calls(trial,status,reserved,attempt,request_id,provider,model,endpoint,reserved_tokens,token_ceiling,long_context_threshold,long_context_multiplier) VALUES(?,'unknown',?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO calls(trial,status,reserved,attempt,request_id,provider,model,endpoint,reserved_tokens,token_ceiling,long_context_threshold,long_context_multiplier,input_price) VALUES(?,'unknown',?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     trial,
                     amount,
@@ -194,6 +199,7 @@ class Ledger:
                     token_ceiling,
                     long_context_threshold,
                     long_context_multiplier,
+                    price,
                 ),
             ).lastrowid
 
@@ -205,7 +211,7 @@ class Ledger:
             raise ValueError("usage outside documented ceiling; reservation retained")
         with self.connect() as db:
             policy = db.execute(
-                "SELECT token_ceiling,long_context_threshold,long_context_multiplier FROM calls WHERE id=? AND status='unknown'",
+                "SELECT token_ceiling,long_context_threshold,long_context_multiplier,input_price FROM calls WHERE id=? AND status='unknown'",
                 (call_id,),
             ).fetchone()
             if not policy or usage["input_tokens"] > policy[0]:
@@ -218,7 +224,9 @@ class Ledger:
             updated = db.execute(
                 "UPDATE calls SET status='known',reserved=?,input_tokens=?,output_tokens=?,latency=? WHERE id=? AND status='unknown'",
                 (
-                    usage["input_tokens"] * self.price * multiplier,
+                    usage["input_tokens"]
+                    * (self.price if policy[3] is None else policy[3])
+                    * multiplier,
                     usage["input_tokens"],
                     usage["output_tokens"],
                     latency,
@@ -299,6 +307,34 @@ class Ledger:
             budget_nanodollars=self.budget,
         )
         return result
+
+    def by_endpoint(self, trial=None):
+        """Keep embedding and Decisions cost/usage separate without losing totals."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT endpoint,model,COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(reserved),0),SUM(status='unknown'),COALESCE(SUM(latency),0) FROM calls"
+                + (" WHERE trial=?" if trial else "")
+                + " GROUP BY endpoint,model ORDER BY endpoint,model",
+                (trial,) if trial else (),
+            ).fetchall()
+        return [
+            dict(
+                zip(
+                    (
+                        "endpoint",
+                        "model",
+                        "calls",
+                        "input_tokens",
+                        "accounted_nanodollars",
+                        "unknown_calls",
+                        "latency_seconds",
+                    ),
+                    row,
+                    strict=True,
+                )
+            )
+            for row in rows
+        ]
 
     def diagnostics(self, trial=None):
         with self.connect() as db:

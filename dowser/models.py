@@ -84,6 +84,16 @@ class InvestigationMemory(Boundary):
     historical: bool = False
 
 
+class MemoryQueryIntent(Boundary):
+    """Trusted, dynamically rendered recall intent; vectors stay inside the harness."""
+
+    text: str = Field(min_length=1)
+    source: str = "platform"
+    entity: str | None = None
+    tool: str | None = None
+    evidence_kind: str | None = None
+
+
 class IncidentState(Boundary):
     schema_version: Literal["1"] = "1"
     incident_id: str = Field(min_length=1)

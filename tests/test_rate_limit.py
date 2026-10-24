@@ -2,7 +2,7 @@
 
 import unittest
 
-from dowser.rate_limit import RateLimiter, shared_rate_limiter
+from dowser.rate_limit import RateLimiter, UnlimitedRateLimiter, shared_rate_limiter
 
 
 class Clock:
@@ -19,6 +19,16 @@ class Clock:
 
 
 class RateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_unlimited_admission_has_no_invented_account_caps(self):
+        limiter = UnlimitedRateLimiter()
+        ticket = await limiter.acquire(10**12)
+        self.assertEqual(ticket.waited, 0)
+        limiter.reconcile(ticket, 7)
+        self.assertEqual(ticket.tokens, 7)
+        limiter.discard(ticket)
+        with self.assertRaises(TimeoutError):
+            await limiter.acquire(1, 0)
+
     async def test_requests_are_bounded_in_a_rolling_second(self):
         clock = Clock()
         limiter = RateLimiter(2, 100, clock=clock.read, sleeper=clock.sleep)

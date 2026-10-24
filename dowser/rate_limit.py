@@ -14,6 +14,26 @@ class Admission:
     waited: float
 
 
+class UnlimitedRateLimiter:
+    """Explicit user-selected absence of client-side account admission limits."""
+
+    async def acquire(self, tokens, deadline=None):
+        if type(tokens) is not int or tokens < 0:
+            raise ValueError("invalid token reservation")
+        current = time.monotonic()
+        if deadline is not None and current >= deadline:
+            raise TimeoutError("incident deadline exhausted")
+        return Admission(current, tokens, 0)
+
+    def reconcile(self, ticket, tokens):
+        if type(tokens) is not int or tokens < 0:
+            raise ValueError("invalid actual token usage")
+        ticket.tokens = tokens
+
+    def discard(self, ticket):
+        pass
+
+
 class RateLimiter:
     def __init__(
         self,

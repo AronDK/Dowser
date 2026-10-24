@@ -32,8 +32,9 @@ class RegistrySettings(Boundary):
 
 
 class DefaultRegistry(Component):
-    def __init__(self, plugins):
+    def __init__(self, plugins, store=None):
         self.plugins = plugins
+        self.store = store
         self.tools: dict[str, tuple[ToolSpec, object]] = {}
         for plugin in plugins:
             check_component(type(plugin), "tool_plugin")
@@ -91,8 +92,19 @@ class DefaultRegistry(Component):
 
     async def candidates(self, state):
         result = []
+        hints = []
         for plugin in self.plugins:
             result.extend(await plugin.candidates(state.model_copy(deep=True)))
+            hook = getattr(plugin, "memory_query_hints", None)
+            if hook:
+                hints.extend(await hook(state.model_copy(deep=True), result))
+        setter = getattr(self.store, "set_memory_query_hints", None)
+        if setter:
+            await setter(state, hints)
+        for plugin in self.plugins:
+            hook = getattr(plugin, "recall_candidates", None)
+            if hook:
+                result.extend(await hook(state.model_copy(deep=True), result))
         return self.snapshot(result)
 
     async def validate(self, candidate, state):
@@ -189,7 +201,7 @@ async def tool_registry(settings, context):
             plugins.append(plugin)
             if not isinstance(plugin, fn.component_type):
                 raise ValueError("plugin factory returned unexpected type")
-        return DefaultRegistry(plugins)
+        return DefaultRegistry(plugins, context.services.get("event_store"))
     except BaseException:
         cleanup_errors = []
         for plugin in reversed(plugins):
@@ -207,7 +219,7 @@ async def tool_registry(settings, context):
 class ContextSettings(Boundary):
     recent_outcomes: int = Field(default=4, ge=0)
     memory_bytes: int = Field(default=8192, ge=1024)
-    profile: str = Field(default="bounded", pattern=r"^(bounded|large)$")
+    profile: str = Field(default="bounded", pattern=r"^(bounded|large|semantic)$")
     model: str = "gpt-6-luna"
     input_tokens: int = Field(default=1000000, ge=1024, le=1000000)
 
@@ -245,9 +257,19 @@ class DefaultContextBuilder(Component):
             state, candidates, self.settings.recent_outcomes
         ).model_copy(deep=True)
         memory = None
+        retrieval = {}
         if self.store is not None:
+            if self.settings.profile == "semantic":
+                lookup = getattr(self.store, "retrieve_memory", None)
+                if lookup is None:
+                    raise ValueError("semantic context requires a semantic store")
+                result = await lookup(state, candidates, None)
+                memory = InvestigationMemory.model_validate(result["memory"])
+                retrieval = result["retrieval"]
             lookup = getattr(self.store, "memory", None)
-            if lookup:
+            if memory is not None:
+                pass
+            elif lookup:
                 memory = InvestigationMemory.model_validate(
                     await lookup(state, candidates, None)
                     if self.settings.profile == "large"
@@ -269,7 +291,7 @@ class DefaultContextBuilder(Component):
                     progress={"actions": len(outcomes)},
                 )
             while (
-                self.settings.profile != "large"
+                self.settings.profile == "bounded"
                 and len(memory.model_dump_json().encode()) > self.settings.memory_bytes
             ):
                 if len(memory.facts) > 2:
@@ -290,7 +312,14 @@ class DefaultContextBuilder(Component):
             state=view,
             candidates=candidates,
             memory=memory,
+            retrieval=retrieval,
         )
+        if self.settings.profile == "semantic":
+            request.context_metadata = {
+                "profile": "semantic",
+                "input_budget": self.settings.input_tokens,
+                "interpretations": "Hypotheses and retrieval scores are interpretations, not evidence or permissions.",
+            }
         if self.settings.profile == "large":
             choices = getattr(self.store, "recent_choices", None)
             request.retrieval = {
@@ -337,7 +366,7 @@ class DefaultContextBuilder(Component):
                 )
                 usage["entries"] = usage["entries"][:1]
                 return request
-        if self.settings.profile == "large":
+        if self.settings.profile in {"large", "semantic"}:
             omissions = request.context_metadata.setdefault("omissions", {})
             if request.memory and len(request.memory.facts) > 2:
                 keep = max(2, len(request.memory.facts) // 2)
@@ -350,6 +379,13 @@ class DefaultContextBuilder(Component):
                 request.retrieval["omitted_fact_queries"] = [
                     {"category": "fact", "offset": 0}
                 ]
+                request.retrieval.setdefault("trimmed_refs", []).extend(
+                    {
+                        "event_ref": f.get("event_ref"),
+                        "document_id": f.get("document_id"),
+                    }
+                    for f in omitted
+                )
                 return request
             if request.memory and len(request.memory.actions) > 1:
                 keep = max(1, len(request.memory.actions) // 2)

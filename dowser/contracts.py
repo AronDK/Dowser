@@ -259,7 +259,12 @@ INTERFACES["tool_plugin"] = INTERFACES["tool_registry"]
 INTERFACES["decision_policy"] = {"apply": 3}
 OPTIONAL_INTERFACES = {
     "decision_provider": {"capabilities": 0, "assess": 1},
-    "tool_plugin": {"action_identity": 2, "extract_memory": 2},
+    "tool_plugin": {
+        "action_identity": 2,
+        "extract_memory": 2,
+        "memory_query_hints": 2,
+        "recall_candidates": 2,
+    },
     "tool_registry": {"action_identity": 2},
     "event_store": {
         "action_count": 2,
@@ -272,6 +277,11 @@ OPTIONAL_INTERFACES = {
         "query_history": 2,
         "recent_choices": 2,
         "action_templates": 2,
+        "sync_memory": 1,
+        "retrieve_memory": 3,
+        "memory_query_intents": 2,
+        "set_memory_query_hints": 2,
+        "search_memory": 2,
     },
 }
 

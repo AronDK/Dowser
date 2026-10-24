@@ -50,6 +50,8 @@ DEFAULTS = {
     "freshness_seconds": 600,
     "budget_usd": None,
     "memory_bytes": 8192,
+    "memory_arm": "A",
+    "semantic_memory": {},
     "max_retries": 2,
     "retry_initial_seconds": 0.5,
     "retry_max_seconds": 5,
@@ -327,7 +329,9 @@ def campaign_manifest(prepared, base):
             memory_profile="large",
             input_tokens=1000000,
         )
-    return {
+        if DEFAULTS["memory_arm"] != "A":
+            configuration["memory_profile"] = "semantic"
+    result = {
         "title": TITLE,
         "created_at": datetime.now(UTC).isoformat(),
         "dataset_fingerprint": prepared["fingerprint"],
@@ -379,6 +383,21 @@ def campaign_manifest(prepared, base):
             "https://github.com/typesafe-ai/typesafe-sdk-python/blob/f078f1e208a0d885154dc758344ae4fce77ac168/src/typesafe_sdk/_core/retry.py",
         ],
     }
+    if DEFAULTS["memory_arm"] != "A":
+        from .semantic_store import SemanticSettings
+
+        settings = SemanticSettings.model_validate(DEFAULTS["semantic_memory"])
+        result["pricing"]["embeddings"] = {
+            "model": settings.embedding_model,
+            "input_nanodollars_per_token": settings.input_price,
+            "source": "https://developers.openai.com/api/docs/models/text-embedding-3-small",
+        }
+        result["methodological_differences"].append(
+            "Memory arm "
+            + DEFAULTS["memory_arm"]
+            + ": incident-only automatic retrieval over committed admitted evidence; RAM vector index and one-hop observed graph, with durable embedding cache. Uninspected snapshot records are excluded. Dynamic recall choices preserve original evidence freshness."
+        )
+    return result
 
 
 def freeze_price_source(directory):
@@ -403,6 +422,24 @@ def freeze_price_source(directory):
         if "$0.10" not in doc or "272" not in model_doc or "2x" not in model_doc:
             raise ValueError("Decisions pricing changed; verify before paid execution")
         (directory / "pricing-source.md").write_text(doc + "\n" + model_doc)
+        if DEFAULTS["memory_arm"] in {"C", "D"}:
+            embedding_doc = (
+                urllib.request.urlopen(
+                    "https://developers.openai.com/api/docs/models/text-embedding-3-small.md",
+                    timeout=15,
+                )
+                .read()
+                .decode()
+            )
+            if (
+                "$0.02" not in embedding_doc
+                or DEFAULTS["semantic_memory"].get("input_price", 20) != 20
+            ):
+                raise ValueError(
+                    "embedding pricing changed; verify before paid execution"
+                )
+            with (directory / "pricing-source.md").open("a") as handle:
+                handle.write("\n" + embedding_doc)
         return file_hash(directory / "pricing-source.md")
     import urllib.request
 
@@ -445,7 +482,7 @@ def trial_config(campaign, prepared, scenario, trial, seed):
         "seed": seed,
         "allow_escalation": DEFAULTS["allow_model_escalation"],
     }
-    return Configuration.model_validate(
+    configuration = Configuration.model_validate(
         {
             "limits": {
                 "incident_seconds": DEFAULTS["incident_seconds"],
@@ -534,6 +571,28 @@ def trial_config(campaign, prepared, scenario, trial, seed):
             },
         }
     )
+    if DEFAULTS["memory_arm"] != "A":
+        from .config import FactoryReference
+        from .semantic_store import SemanticSettings
+
+        memory = SemanticSettings.model_validate(DEFAULTS["semantic_memory"])
+        configuration.event_store = FactoryReference(
+            factory="dowser.semantic_store:semantic_store",
+            settings={
+                **memory.model_dump(),
+                "mode": {"B": "deterministic", "C": "vector", "D": "graph"}[
+                    DEFAULTS["memory_arm"]
+                ],
+                "path": str(campaign / "history.sqlite3"),
+                "journal": str(campaign / "audit.jsonl"),
+                "ledger": str(campaign / "spending.sqlite3"),
+            },
+        )
+        configuration.context_builder.settings["profile"] = "semantic"
+        configuration.tool_registry.settings["plugins"][-1] = {
+            "factory": "plugins.semantic_memory:tool_plugin"
+        }
+    return configuration
 
 
 def failure_category(events, terminal, ledger, trial):
@@ -713,6 +772,39 @@ async def run_trial(campaign, prepared, scenario, trial, seed, phase, base):
         if recorded.get("error_type") == "ContextOverflowError":
             recorded["category"] = "context"
     recorded.update(ledger.stats(trial))
+    recorded["api_usage"] = ledger.by_endpoint(trial)
+    retrieval_operations = [
+        e["payload"] for e in events if e["kind"] == "memory_retrieval"
+    ]
+    retrievals = [
+        e["payload"]["request"]["retrieval"]
+        for e in events
+        if e["kind"] == "provider_request"
+        and e["payload"].get("request", {}).get("retrieval", {}).get("version")
+        == "semantic/1"
+    ]
+    recorded["retrieval"] = {
+        "rounds": len(retrievals),
+        "operations": len(retrieval_operations),
+        "cached_rounds": sum(r.get("cache_hit", False) for r in retrievals),
+        "process_peak_rss_bytes": max(
+            (r.get("process_peak_rss_bytes") or 0 for r in retrievals), default=0
+        ),
+        "seconds": sum(r.get("seconds", 0) for r in retrieval_operations)
+        + sum(r.get("seconds", 0) for r in retrievals if r.get("cache_hit")),
+        "degraded_rounds": sum(r.get("status") == "degraded" for r in retrievals),
+        "peak_documents": max(
+            (r.get("indexed_documents", 0) for r in retrievals), default=0
+        ),
+        "peak_vector_documents": max(
+            (r.get("vector_documents", 0) for r in retrievals), default=0
+        ),
+        "semantic_recall_actions": sum(
+            e["kind"] == "execution_started"
+            and e["payload"].get("candidate", {}).get("tool") == "memory.search"
+            for e in events
+        ),
+    }
     reads, recalled, keys = 0, 0, []
     decisions, navigation, unchanged_decisions = [], [], []
     semantic_findings = set()
@@ -869,6 +961,17 @@ def report(campaign):
         else None,
         "duration_seconds": sum(r.get("duration_seconds", 0) for r in completed),
         "ledger": ledger,
+        "api_usage": spending.by_endpoint(),
+        "memory_arm": manifest["configuration"].get("memory_arm", "A"),
+        "retrieval": {
+            key: sum(r.get("retrieval", {}).get(key, 0) for r in completed)
+            for key in (
+                "rounds",
+                "seconds",
+                "degraded_rounds",
+                "semantic_recall_actions",
+            )
+        },
         "failure_codes": dict(Counter(d["failure"]["code"] for d in diagnostics)),
         "budget_usd": ledger["budget_nanodollars"] / 1e9
         if ledger["budget_nanodollars"] is not None
@@ -988,8 +1091,26 @@ async def run_campaign(
         from plugins.openai_decisions import OpenAISettings
 
         account = OpenAISettings.model_validate(DEFAULTS["openai"])
-        if account.requests_per_minute is None or account.tokens_per_minute is None:
+        if not account.unlimited_account_limits and (
+            account.requests_per_minute is None or account.tokens_per_minute is None
+        ):
             raise ValueError("configure OpenAI account RPM and TPM before paid runs")
+    if DEFAULTS["memory_arm"] != "A":
+        from .semantic_store import SemanticSettings
+
+        settings = SemanticSettings.model_validate(DEFAULTS["semantic_memory"])
+        if DEFAULTS["provider"] != "openai" or phase == "all":
+            raise ValueError(
+                "memory evaluations require OpenAI and an explicit pilot/full phase"
+            )
+        if (
+            DEFAULTS["memory_arm"] in {"C", "D"}
+            and not settings.unlimited_account_limits
+            and (settings.embedding_rpm is None or settings.embedding_tpm is None)
+        ):
+            raise ValueError("configure embedding RPM and TPM before paid runs")
+        if DEFAULTS["assessments"]:
+            raise ValueError("memory evaluations keep assessments disabled")
     if continue_interrupted and phase != "pilot":
         raise ValueError("interrupted-case continuation is restricted to pilot phase")
     base = Path(base or Path.cwd()).absolute()
@@ -1282,6 +1403,17 @@ def main(argv=None):
             sub.add_argument("--provider", choices=["openai", "jev"], default="openai")
             sub.add_argument("--openai-rpm", type=int)
             sub.add_argument("--openai-tpm", type=int)
+            sub.add_argument(
+                "--unlimited-account-limits",
+                action="store_true",
+                help="Explicitly disable client-side account RPM/TPM admission",
+            )
+            sub.add_argument("--memory-arm", choices=["A", "B", "C", "D"], default="A")
+            sub.add_argument("--embedding-rpm", type=int)
+            sub.add_argument("--embedding-tpm", type=int)
+            sub.add_argument("--account-rpm", type=int)
+            sub.add_argument("--account-tpm", type=int)
+            sub.add_argument("--memory-tokens", type=int, default=16384)
             sub.add_argument("--regional-processing", action="store_true")
             sub.add_argument(
                 "--assessments",
@@ -1333,8 +1465,29 @@ def main(argv=None):
                 "requests_per_minute": args.openai_rpm,
                 "tokens_per_minute": args.openai_tpm,
                 "regional_processing": args.regional_processing,
+                "unlimited_account_limits": args.unlimited_account_limits,
             }
+            if args.account_rpm is not None or args.account_tpm is not None:
+                DEFAULTS["openai"].update(
+                    account_requests_per_minute=args.account_rpm,
+                    account_tokens_per_minute=args.account_tpm,
+                )
             DEFAULTS["assessments"] = args.assessments
+            DEFAULTS["memory_arm"] = args.memory_arm
+            if args.memory_arm != "A":
+                from .semantic_store import SemanticSettings
+
+                DEFAULTS["semantic_memory"] = SemanticSettings(
+                    mode={"B": "deterministic", "C": "vector", "D": "graph"}[
+                        args.memory_arm
+                    ],
+                    embedding_rpm=args.embedding_rpm,
+                    embedding_tpm=args.embedding_tpm,
+                    unlimited_account_limits=args.unlimited_account_limits,
+                    account_rpm=args.account_rpm,
+                    account_tpm=args.account_tpm,
+                    memory_tokens=args.memory_tokens,
+                ).model_dump()
             from plugins.escalation import Settings as EscalationSettings
 
             controls = EscalationSettings(

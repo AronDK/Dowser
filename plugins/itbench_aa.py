@@ -762,11 +762,17 @@ class BudgetedProvider(Component):
                 context.base_dir / settings.ledger,
                 price=110 if config.regional_processing else 100,
             )
-            limiter = shared_rate_limiter(
-                "openai:" + str(self.ledger.path.absolute()),
-                config.requests_per_minute or 1,
-                config.tokens_per_minute or 1,
-                window_seconds=60,
+            from dowser.rate_limit import UnlimitedRateLimiter
+
+            limiter = (
+                UnlimitedRateLimiter()
+                if config.unlimited_account_limits
+                else shared_rate_limiter(
+                    "openai:" + str(self.ledger.path.absolute()),
+                    config.requests_per_minute or 1,
+                    config.tokens_per_minute or 1,
+                    window_seconds=60,
+                )
             )
             self.provider = OpenAIDecisionsProvider(
                 config, context, accounting=self, rate_limiter=limiter
